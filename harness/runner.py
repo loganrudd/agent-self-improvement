@@ -78,7 +78,7 @@ if __name__ == "__main__":
 
     base_config = AgentConfig(
         config_id="v0-base",
-        model="gemini-2.0-flash",
+        model="MiniMax-M2.7-highspeed",
         few_shot_examples=[],
     )
     print(f"Running {len(items)} questions ({n} per phase)...")

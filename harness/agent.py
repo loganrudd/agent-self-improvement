@@ -1,9 +1,13 @@
-"""Text-to-SQL agent (Gemini, weaker tier as base).
+"""Text-to-SQL agent (MiniMax, weaker tier as base).
 
 KEY: the prompt MUST include config.few_shot_examples — that growing list is how the
 agent recovers after correction feeds it learned examples.
 
 - generate_sql(question, schema_text, config) -> (sql, tokens, latency_ms)
+
+Models:
+  base agent  -> MiniMax-M2.7-highspeed  (fast; genuinely struggles on hard SQL)
+  teacher     -> MiniMax-M3              (Mihir's correction stage uses this)
 """
 from __future__ import annotations
 
@@ -11,18 +15,22 @@ import os
 import re
 import time
 
-from google import genai
-from google.genai import types as genai_types
+from openai import OpenAI
 
 from contracts.schemas import AgentConfig, FewShotExample
 
-_client: genai.Client | None = None
+_MINIMAX_BASE_URL = "https://api.minimax.io/v1"
+
+_client: OpenAI | None = None
 
 
-def _get_client() -> genai.Client:
+def _get_client() -> OpenAI:
     global _client
     if _client is None:
-        _client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
+        _client = OpenAI(
+            api_key=os.environ.get("MINIMAX_API_KEY", ""),
+            base_url=_MINIMAX_BASE_URL,
+        )
     return _client
 
 
@@ -58,16 +66,16 @@ def generate_sql(
     try:
         client = _get_client()
         prompt = _build_prompt(question, schema, config.few_shot_examples)
-        response = client.models.generate_content(
+        response = client.chat.completions.create(
             model=config.model,
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=_SYSTEM,
-                temperature=0.0,
-            ),
+            messages=[
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
         )
-        sql = _strip_fences(response.text)
-        tokens = response.usage_metadata.total_token_count or 0 if response.usage_metadata else 0
+        sql = _strip_fences(response.choices[0].message.content or "")
+        tokens = response.usage.total_tokens if response.usage else 0
     except Exception as e:
         sql = f"-- error: {e}"
         tokens = 0
