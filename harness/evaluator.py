@@ -41,6 +41,8 @@ def execution_accuracy(generated_sql: str, gold_sql: str, db_path: str) -> float
 
 
 def query_valid(sql: str, db_path: str) -> bool:
+    if sql.startswith("-- error:") or not sql.strip():
+        return False
     return execute(sql, db_path) is not None
 
 
