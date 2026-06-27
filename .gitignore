@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+CLAUDE.local.md
+.claude/settings.local.json
+# Spider data (downloaded, not committed)
+data/spider/
+# generated artifacts
+events.jsonl
+fixtures/mock_*.jsonl
+*.sqlite
+*.db
