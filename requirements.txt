@@ -6,5 +6,6 @@ uvicorn>=0.29
 # Add stage-specific deps below your name:
 # [Logan]
 # [Rohan]
+google-genai>=1.0   # new SDK (google-generativeai is deprecated)
 # [Mihir]
 # [Yiwen]
