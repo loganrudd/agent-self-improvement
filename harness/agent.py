@@ -50,10 +50,25 @@ def _build_prompt(question: str, schema: str, examples: list[FewShotExample]) ->
     return "\n\n".join(parts)
 
 
+def _strip_think(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks (MiniMax M-series reasoning models).
+    Also handles unclosed <think> (model cut off mid-reasoning — no valid SQL follows).
+    """
+    # closed block: strip the think section, keep what follows
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    # unclosed block: model was cut off mid-think — strip from <think> to end
+    text = re.sub(r"<think>.*", "", text, flags=re.DOTALL).strip()
+    return text
+
+
 def _strip_fences(text: str) -> str:
     text = text.strip()
     m = re.search(r"```(?:sql)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
     return m.group(1).strip() if m else text
+
+
+def _clean_response(text: str) -> str:
+    return _strip_fences(_strip_think(text))
 
 
 def generate_sql(
@@ -74,7 +89,7 @@ def generate_sql(
             ],
             temperature=0.0,
         )
-        sql = _strip_fences(response.choices[0].message.content or "")
+        sql = _clean_response(response.choices[0].message.content or "")
         tokens = response.usage.total_tokens if response.usage else 0
     except Exception as e:
         sql = f"-- error: {e}"
