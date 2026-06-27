@@ -49,7 +49,9 @@ def count_complexity(sql: str) -> int:
     upper = sql.upper()
     joins = len(re.findall(r"\bJOIN\b", upper))
     nested = max(0, len(re.findall(r"\bSELECT\b", upper)) - 1)
-    return joins + nested
+    having = 1 if re.search(r"\bHAVING\b", upper) else 0
+    group_by = 1 if re.search(r"\bGROUP BY\b", upper) else 0
+    return joins + nested + having + group_by
 
 
 def main() -> None:
