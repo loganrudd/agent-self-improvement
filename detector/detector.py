@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from enum import Enum, auto
 
-from contracts.schemas import DriftEvent, FailureMode, TelemetryRecord
+from contracts.schemas import Difficulty, DriftEvent, FailureMode, TelemetryRecord
 
 from detector.baseline import fit_baseline
 from detector.config import DetectorConfig
@@ -56,6 +56,9 @@ class Detector:
         self._warmup_buf: list[TelemetryRecord] = []
         self._baseline = None  # set after warmup; type: Baseline
         self._acc_window = RollingStats(maxlen=self._cfg.window)
+        self._strat_windows: dict[Difficulty, RollingStats] = {
+            d: RollingStats(maxlen=self._cfg.window) for d in Difficulty
+        }
         self._breach_streak: int = 0
 
     # ------------------------------------------------------------------
@@ -71,6 +74,7 @@ class Detector:
         # Always push accuracy into the rolling window (even during warmup so
         # the window is warm by the time the baseline freezes).
         self._acc_window.push(record.execution_accuracy)
+        self._strat_windows[record.difficulty].push(record.execution_accuracy)
 
         if self._state is _State.WARMUP:
             return self._handle_warmup(record)
@@ -80,6 +84,15 @@ class Detector:
 
         # DRIFTING: latched — never fires again
         return None
+
+    def stratified_means(self) -> dict[Difficulty, float]:
+        """Current windowed execution-accuracy per difficulty.
+
+        Returns only buckets with at least one record in the current window;
+        an empty bucket is omitted rather than reported as a misleading 0.0.
+        Call right after update() returns a DriftEvent to snapshot the fire moment.
+        """
+        return {d: w.mean for d, w in self._strat_windows.items() if w.n > 0}
 
     # ------------------------------------------------------------------
     # Internal state handlers
