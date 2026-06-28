@@ -71,7 +71,7 @@ detector/
 ## Phase 4 — Failure-mode diagnosis + `failing_run_ids`
 **What:** At fire time classify each failing run (`query_valid==False` → `INVALID_SQL`; valid but `execution_accuracy==0` → `VALID_BUT_WRONG`), set `failure_mode` to the **majority** among failures, collect `failing_run_ids`.
 
-**Verify:** Mock → `failure_mode==VALID_BUT_WRONG` (39 > 25, matches the mock's own event), ids non-empty, ≤ cap, all real failing runs in the degraded window. Unit tests: all-invalid → `INVALID_SQL`; all-valid-wrong → `VALID_BUT_WRONG`; mixed → majority.
+**Verify:** Mock → `failure_mode==VALID_BUT_WRONG` (7 VALID_BUT_WRONG vs 3 INVALID_SQL in the detector's fire window `[65..89]`), ids non-empty, ≤ cap=8, every id a real `acc==0` run **inside the detector's fire window** (not the full `[80:160]` degraded segment). Note: the window straddles the change-point, so a baseline-phase failure (`run_0072`) legitimately appears in `failing_run_ids` — the streaming detector cannot know the change-point location (intentionally). Verify assertions are structural, not exact-list equality with the mock's offline-selected ids. Unit tests: all-invalid → `INVALID_SQL`; all-valid-wrong → `VALID_BUT_WRONG`; mixed → majority; tie → `VALID_BUT_WRONG`.
 
 **Decision 6 — classification rule:** **count-based majority of actual failures** (data-driven, handles mixed windows, agrees with the mock) over the coarse "validity-low → invalid" heuristic (which would mis-call this 0.69-validity window).
 
