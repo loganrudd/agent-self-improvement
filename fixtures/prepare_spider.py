@@ -30,6 +30,13 @@ TARGET_EASY_MED = 50
 TARGET_HARD_EXTRA = 50
 SEED = 42
 
+# Top 8 Spider dev DBs by hard+extra question count (car_1=40, world_1=36, ...).
+# Used by --dev-concentrated to guarantee deep same-DB clusters for few-shot learning.
+_CONCENTRATED_DBS = [
+    "car_1", "world_1", "dog_kennels", "network_1",
+    "student_transcripts_tracking", "flight_2", "cre_Doc_Template_Mgt", "pets_1",
+]
+
 
 def classify_difficulty(sql: str) -> str:
     upper = sql.upper()
@@ -204,5 +211,75 @@ def main() -> None:
         print(f"  [{item['id']}] [{item['difficulty']}] {item['question'][:70]}")
 
 
+def main_dev_concentrated() -> None:
+    """Rebuild spider_subset.json from dev.json, restricted to the 8 highest hard/extra-density
+    databases. This gives 200+ hard/extra questions in deep same-DB clusters (10-30 siblings each),
+    so the same-DB leave-one-out split can always find a relevant few-shot example.
+    """
+    dev_path = Path("spider_data/dev.json")
+    db_base = Path("spider_data/database")
+
+    if not dev_path.exists():
+        print(f"ERROR: {dev_path} not found — run from repo root with spider_data/ present.")
+        sys.exit(1)
+
+    with open(dev_path) as f:
+        data = json.load(f)
+
+    focus = set(_CONCENTRATED_DBS)
+    classified = []
+    for item in data:
+        db_id = item["db_id"]
+        if db_id not in focus:
+            continue
+        sql = item.get("query", "")
+        classified.append({
+            "db_id": db_id,
+            "question": item["question"],
+            "expected_sql": sql,
+            "difficulty": classify_difficulty(sql),
+            "required_complexity": count_complexity(sql),
+        })
+
+    easy_med = [q for q in classified if q["difficulty"] in ("easy", "medium")]
+    hard_extra = [q for q in classified if q["difficulty"] in ("hard", "extra")]
+    print(f"Concentrated subset: {len(easy_med)} easy/med, {len(hard_extra)} hard/extra "
+          f"across {len(focus)} DBs")
+
+    rng = random.Random(SEED)
+    rng.shuffle(easy_med)
+    rng.shuffle(hard_extra)
+    selected = easy_med + hard_extra  # take all — deep clusters are the point
+
+    for i, item in enumerate(selected):
+        item["id"] = f"spider_{i + 1:03d}"
+
+    OUTPUT_DBS.mkdir(parents=True, exist_ok=True)
+    copied_dbs: set[str] = set()
+    for item in selected:
+        db_id = item["db_id"]
+        if db_id not in copied_dbs:
+            src = db_base / db_id / f"{db_id}.sqlite"
+            if not src.exists():
+                print(f"  SKIP {db_id}: SQLite not found at {src}")
+                continue
+            shutil.copy(str(src), str(OUTPUT_DBS / f"{db_id}.sqlite"))
+            copied_dbs.add(db_id)
+
+    with open(OUTPUT_JSON, "w") as f:
+        json.dump(selected, f, indent=2)
+
+    print(f"Wrote {len(selected)} questions → {OUTPUT_JSON}")
+    print(f"Copied {len(copied_dbs)} databases → {OUTPUT_DBS}/")
+    from collections import Counter
+    by_db = Counter(q["db_id"] for q in hard_extra)
+    print("\nhard/extra per DB:")
+    for db, c in sorted(by_db.items(), key=lambda kv: -kv[1]):
+        print(f"  {c:>4}  {db}")
+
+
 if __name__ == "__main__":
-    main()
+    if "--dev-concentrated" in sys.argv:
+        main_dev_concentrated()
+    else:
+        main()
