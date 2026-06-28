@@ -93,6 +93,14 @@ def build_state(path: Path | str = None, window: int = WINDOW) -> dict:
             hard_active = any(recent)
             easy_active = not all(recent)
 
+            # how many same-DB correction examples are currently active for this run's schema
+            # (populated after correction fires; used to show the learning mechanism in the UI)
+            same_db_active = 0
+            if correction:
+                same_db_active = sum(
+                    1 for e in correction["examples"] if e.get("db_id") == ev.db_id
+                )
+
             runs.append({
                 "run_index": seen_runs,
                 "run_id": ev.run_id,
@@ -114,6 +122,7 @@ def build_state(path: Path | str = None, window: int = WINDOW) -> dict:
                 "generated_sql": ev.generated_sql,
                 "db_id": ev.db_id,
                 "verdict": _verdict(ev),
+                "same_db_examples_active": same_db_active,
             })
             seen_runs += 1
 

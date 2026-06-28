@@ -75,7 +75,7 @@
       </div>
     </section>
 
-    <!-- SQL EXAMPLE PANEL: what the agent generated at this run; the learned fix -->
+    <!-- SQL EXAMPLE PANEL: what the agent generated at this run -->
     <section class="example" aria-label="SQL example">
       <div class="ex-head">
         <h2>What the agent generated <span class="muted">&middot; run <span id="ex-run">&mdash;</span></span></h2>
@@ -84,18 +84,14 @@
       <div class="ex-meta">
         <span class="pill" id="ex-db">db</span>
         <span class="ex-q" id="ex-question">&mdash;</span>
+        <span class="examples-active" id="ex-active" hidden>
+          &#10010; <span id="ex-active-count">0</span> learned example<span id="ex-active-plural">s</span> active from this schema
+        </span>
       </div>
       <div class="ex-sql">
         <div class="sql-block">
           <div class="sql-label">agent SQL</div>
           <pre id="ex-generated">&mdash;</pre>
-        </div>
-        <div class="sql-block learned" id="ex-learned-block" hidden>
-          <div class="sql-label learned-label">
-            &#10010; teacher&rsquo;s corrected SQL
-            <span class="muted">&middot; learned at run <span id="ex-learned-at">&mdash;</span></span>
-          </div>
-          <pre id="ex-learned">&mdash;</pre>
         </div>
       </div>
     </section>

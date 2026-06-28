@@ -272,6 +272,13 @@ html, body {
   color: var(--text);
   font-size: .95rem;
 }
+.examples-active {
+  font-size: .82rem;
+  color: var(--c-correct);
+  font-weight: 600;
+  white-space: nowrap;
+  margin-left: auto;
+}
 
 .ex-sql {
   display: flex;
