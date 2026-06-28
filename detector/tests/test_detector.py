@@ -15,7 +15,12 @@ import pytest
 
 from contracts.schemas import Difficulty, DriftEvent, FailureMode, TelemetryRecord
 from detector.config import DetectorConfig
-from detector.detector import Detector, OUTAGE_SQL_PREFIX, _is_outage_record
+from detector.detector import (
+    Detector,
+    OUTAGE_SQL_PREFIX,
+    _classify_failure,
+    _is_outage_record,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -109,12 +114,16 @@ class TestMockReplayInvariants:
         assert ev.severity > 0
         assert ev.severity == pytest.approx(ev.baseline_mean - ev.window_mean)
 
-    def test_phase4_fields_are_defaults(self):
-        """Phase 4 not built yet — these must be defaults, not garbage."""
-        events, _ = _run_stream(_load_mock())
+    def test_phase4_fields_populated(self):
+        """Phase 4: fire event carries real failure_mode + failing_run_ids."""
+        recs = _load_mock()
+        events, _ = _run_stream(recs)
         ev = events[0]
-        assert ev.failure_mode == FailureMode.NONE
-        assert ev.failing_run_ids == []
+        assert ev.failure_mode == FailureMode.VALID_BUT_WRONG
+        assert len(ev.failing_run_ids) > 0
+        assert len(ev.failing_run_ids) <= DetectorConfig().failing_ids_cap
+        zeros = {r.run_id for r in recs if r.execution_accuracy == 0.0}
+        assert all(rid in zeros for rid in ev.failing_run_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -500,3 +509,216 @@ class TestStratification:
 
     def test_end_extra_climbed(self):
         assert 0.6 <= self._end_snap[Difficulty.EXTRA] <= 0.85
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Failure-mode diagnosis + failing_run_ids
+# ---------------------------------------------------------------------------
+
+class TestFailureMode:
+    """Tests for _classify_failure, Detector._diagnose_failures, and the
+    Phase 4 DriftEvent fields.
+
+    Tiers:
+      Tier A — mock-replay invariants (survive threshold re-tuning)
+      Tier B — behavioral unit tests on _classify_failure and _diagnose_failures
+      Tier C — mock-pinned numbers (seed=7; update if mock regenerated)
+    """
+
+    # ------------------------------------------------------------------
+    # Tier A — mock-replay invariants
+    # ------------------------------------------------------------------
+
+    def test_fire_event_failure_mode_is_valid_but_wrong(self):
+        """Mock's dominant failure kind is VALID_BUT_WRONG (7 > 3 in fire window)."""
+        events, _ = _run_stream(_load_mock())
+        assert events[0].failure_mode == FailureMode.VALID_BUT_WRONG
+
+    def test_fire_event_failing_run_ids_non_empty(self):
+        events, _ = _run_stream(_load_mock())
+        assert len(events[0].failing_run_ids) > 0
+
+    def test_fire_event_failing_run_ids_within_cap(self):
+        cfg = DetectorConfig()
+        events, _ = _run_stream(_load_mock(), cfg)
+        assert len(events[0].failing_run_ids) <= cfg.failing_ids_cap
+
+    def test_fire_event_ids_are_real_failures(self):
+        """Every id in failing_run_ids must be a genuine acc==0 run."""
+        recs = _load_mock()
+        events, _ = _run_stream(recs)
+        zeros = {r.run_id for r in recs if r.execution_accuracy == 0.0}
+        assert all(rid in zeros for rid in events[0].failing_run_ids)
+
+    def test_fire_event_ids_within_fire_window(self):
+        """All ids must come from records that were in the detector's window at fire."""
+        recs = _load_mock()
+        cfg = DetectorConfig()
+        det = Detector(cfg)
+        fire_window_ids: set[str] = set()
+        for r in recs:
+            ev = det.update(r)
+            if ev is not None:
+                fire_window_ids = {rec.run_id for rec in det._record_window}
+                assert all(rid in fire_window_ids for rid in ev.failing_run_ids)
+                break
+
+    # ------------------------------------------------------------------
+    # Tier B — _classify_failure unit tests
+    # ------------------------------------------------------------------
+
+    def test_classify_correct_run_is_none(self):
+        assert _classify_failure(_make_rec(0, acc=1.0, valid=True)) == FailureMode.NONE
+
+    def test_classify_partial_acc_is_none(self):
+        """Strict acc==0 rule: partial accuracy (0 < acc < 1) is not a failure."""
+        assert _classify_failure(_make_rec(0, acc=0.5, valid=True)) == FailureMode.NONE
+
+    def test_classify_invalid_sql_zero_acc(self):
+        assert _classify_failure(_make_rec(0, acc=0.0, valid=False)) == FailureMode.INVALID_SQL
+
+    def test_classify_valid_but_wrong(self):
+        assert _classify_failure(_make_rec(0, acc=0.0, valid=True)) == FailureMode.VALID_BUT_WRONG
+
+    def test_classify_valid_wrong_not_misread_as_invalid(self):
+        r = _make_rec(0, acc=0.0, valid=True, sql="SELECT count(*) FROM singers")
+        assert _classify_failure(r) == FailureMode.VALID_BUT_WRONG
+
+    # ------------------------------------------------------------------
+    # Tier B — _diagnose_failures behavioral tests
+    # ------------------------------------------------------------------
+
+    def _det_with_window(self, records: list) -> Detector:
+        """Build a Detector whose _record_window contains exactly `records`."""
+        cfg = DetectorConfig(
+            baseline_len=len(records),
+            window=len(records),
+            min_sustained=999,  # never fires in these helpers
+        )
+        det = Detector(cfg)
+        for r in records:
+            det.update(r)
+        return det
+
+    def test_diagnose_all_invalid(self):
+        recs = [_make_rec(i, acc=0.0, valid=False) for i in range(5)]
+        det = self._det_with_window(recs)
+        mode, ids = det._diagnose_failures()
+        assert mode == FailureMode.INVALID_SQL
+        assert set(ids) == {r.run_id for r in recs}
+
+    def test_diagnose_all_valid_wrong(self):
+        recs = [_make_rec(i, acc=0.0, valid=True) for i in range(5)]
+        det = self._det_with_window(recs)
+        mode, ids = det._diagnose_failures()
+        assert mode == FailureMode.VALID_BUT_WRONG
+        assert set(ids) == {r.run_id for r in recs}
+
+    def test_diagnose_mixed_majority_invalid(self):
+        """3 INVALID_SQL vs 2 VALID_BUT_WRONG → INVALID_SQL wins."""
+        recs = (
+            [_make_rec(i, acc=0.0, valid=False) for i in range(3)]
+            + [_make_rec(10 + i, acc=0.0, valid=True) for i in range(2)]
+        )
+        det = self._det_with_window(recs)
+        mode, ids = det._diagnose_failures()
+        assert mode == FailureMode.INVALID_SQL
+        dom_ids = [r.run_id for r in recs[:3]]
+        assert ids[:3] == dom_ids  # dominant ids come first
+
+    def test_diagnose_tie_breaks_to_valid_but_wrong(self):
+        """Tie (2 each) → VALID_BUT_WRONG wins (explicit tie-break)."""
+        recs = (
+            [_make_rec(i, acc=0.0, valid=False) for i in range(2)]
+            + [_make_rec(10 + i, acc=0.0, valid=True) for i in range(2)]
+        )
+        det = self._det_with_window(recs)
+        mode, _ = det._diagnose_failures()
+        assert mode == FailureMode.VALID_BUT_WRONG
+
+    def test_diagnose_cap_limits_ids(self):
+        """When failures exceed cap, exactly cap ids are returned."""
+        recs = [_make_rec(i, acc=0.0, valid=True) for i in range(8)]
+        det = Detector(DetectorConfig(
+            baseline_len=len(recs),
+            window=len(recs),
+            min_sustained=999,
+            failing_ids_cap=3,
+        ))
+        for r in recs:
+            det.update(r)
+        _, ids = det._diagnose_failures()
+        assert len(ids) == 3
+
+    def test_diagnose_dominant_ids_prioritized_over_cap(self):
+        """Cap-limited result leads with dominant-mode ids before others."""
+        cfg_kw = dict(baseline_len=6, window=6, min_sustained=999, failing_ids_cap=4)
+        det = Detector(DetectorConfig(**cfg_kw))
+        # 4 VALID_BUT_WRONG, 2 INVALID_SQL — cap=4 should give all 4 dominant
+        vbw = [_make_rec(i, acc=0.0, valid=True) for i in range(4)]
+        inv = [_make_rec(10 + i, acc=0.0, valid=False) for i in range(2)]
+        for r in vbw + inv:
+            det.update(r)
+        mode, ids = det._diagnose_failures()
+        assert mode == FailureMode.VALID_BUT_WRONG
+        dom_run_ids = {r.run_id for r in vbw}
+        assert all(rid in dom_run_ids for rid in ids)  # all 4 slots go to dominant
+
+    def test_diagnose_no_failures_returns_none(self):
+        """If the window holds no acc==0 runs, return (NONE, [])."""
+        recs = [_make_rec(i, acc=1.0) for i in range(5)]
+        det = self._det_with_window(recs)
+        mode, ids = det._diagnose_failures()
+        assert mode == FailureMode.NONE
+        assert ids == []
+
+    def test_diagnose_outages_not_in_ids(self):
+        """Outage records are excluded from _record_window upstream; they must
+        never appear in failing_run_ids even if they look like failures."""
+        cfg = DetectorConfig(baseline_len=3, window=5, min_sustained=999)
+        det = Detector(cfg)
+        # warmup with 3 real good records
+        for i in range(3):
+            det.update(_make_rec(i, acc=1.0))
+        # scatter outages — should not enter _record_window
+        for i in range(5):
+            det.update(_outage_rec(100 + i))
+        # add 2 real failures
+        real_fails = [_make_rec(200 + i, acc=0.0, valid=True) for i in range(2)]
+        for r in real_fails:
+            det.update(r)
+        outage_ids = {f"r{100 + i}" for i in range(5)}
+        _, ids = det._diagnose_failures()
+        assert not any(rid in outage_ids for rid in ids)
+
+    # ------------------------------------------------------------------
+    # Tier C — mock-pinned numbers (seed=7; update if mock regenerated)
+    # ------------------------------------------------------------------
+
+    def setup_method(self):
+        recs = _load_mock()
+        cfg = DetectorConfig()
+        det = Detector(cfg)
+        self._event = None
+        self._fire_window_ids: set[str] = set()
+        self._recs = recs
+        for r in recs:
+            ev = det.update(r)
+            if ev is not None and self._event is None:
+                self._event = ev
+                self._fire_window_ids = {rec.run_id for rec in det._record_window}
+
+    def test_pinned_failure_mode(self):
+        assert self._event.failure_mode == FailureMode.VALID_BUT_WRONG
+
+    def test_pinned_id_count(self):
+        """Fire window has 10 failures; cap=8 → exactly 8 ids."""
+        assert len(self._event.failing_run_ids) == 8
+
+    def test_pinned_majority_split(self):
+        """7 VALID_BUT_WRONG vs 3 INVALID_SQL in fire window — verify the split."""
+        zeros = [r for r in self._recs if r.run_id in self._fire_window_ids and r.execution_accuracy == 0.0]
+        vbw = sum(1 for r in zeros if r.query_valid)
+        inv = sum(1 for r in zeros if not r.query_valid)
+        assert vbw == 7
+        assert inv == 3
