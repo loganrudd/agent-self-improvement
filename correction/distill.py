@@ -9,7 +9,11 @@ import json
 import os
 import uuid
 
+import logging
+
 from .contracts import FailedRun, CorrectionRule
+
+log = logging.getLogger(__name__)
 
 try:
     import google.generativeai as genai
@@ -42,7 +46,9 @@ def distill(failed: FailedRun, fixed_sql: str) -> CorrectionRule:
             source="react_repair",
             seen_dbs=[failed.db_id],
         )
-    except Exception:
+    except Exception as e:
+        log.warning("distill: model call failed for run %s, using fallback rule: %s",
+                    failed.run_id, e)
         return _fallback(rule_id, failed, fixed_sql)
 
 

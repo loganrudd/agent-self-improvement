@@ -6,6 +6,7 @@ uvicorn>=0.29
 # Add stage-specific deps below your name:
 # [Logan]
 # [Rohan]
+openai>=1.0         # used with MiniMax base URL (openai-compatible API)
 # [Mihir]
 networkx>=3.0
 # [Yiwen]

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Self-Improvement</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="/static/vendor/chart.umd.min.js"></script>
+</head>
+<body>
+  <main class="stage">
+    <header class="masthead">
+      <h1>Agent Self-Improvement</h1>
+      <p class="tagline">
+        A text-to-SQL agent drifts as queries get harder &mdash; then learns from its own
+        failures and recovers. <span class="nowrap">No human in the loop.</span>
+      </p>
+    </header>
+
+    <!-- HERO: the recovery curve -->
+    <section class="hero" aria-label="Recovery curve">
+      <div class="hero-head">
+        <h2>Execution accuracy <span class="muted">&middot; windowed over <span id="window-size">20</span> runs</span></h2>
+        <div class="legend" id="legend"></div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="curve"></canvas>
+      </div>
+      <p class="caption" id="caption">&nbsp;</p>
+    </section>
+
+    <!-- TRANSPORT + instrument strip: the system's state at the current run -->
+    <section class="readout" aria-label="Channel panel">
+      <div class="transport">
+        <button id="play" class="btn btn-play">&#9654; Play</button>
+        <label class="speed">speed
+          <select id="speed">
+            <option value="0.5">0.5&times;</option>
+            <option value="1" selected>1&times;</option>
+            <option value="2">2&times;</option>
+            <option value="4">4&times;</option>
+          </select>
+        </label>
+        <button id="jump-drift" class="btn">&#9873; Jump to drift</button>
+      </div>
+      <div class="scrubber">
+        <input id="scrub" type="range" min="0" max="0" value="0" step="1" aria-label="Scrub through runs" />
+        <div class="scrub-label">
+          <span id="scrub-run">run 0</span>
+          <span class="dot-sep">&middot;</span>
+          <span id="scrub-diff" class="pill">easy</span>
+        </div>
+      </div>
+      <div class="channels" id="channels">
+        <div class="chan">
+          <span class="chan-label">Accuracy</span>
+          <span class="chan-val" id="ch-acc">&mdash;</span>
+          <span class="chan-hint">windowed execution</span>
+        </div>
+        <div class="chan">
+          <span class="chan-label">Validity</span>
+          <span class="chan-val" id="ch-valid">&mdash;</span>
+          <span class="chan-hint">valid-SQL rate</span>
+        </div>
+        <div class="chan">
+          <span class="chan-label">Complexity gap</span>
+          <span class="chan-val" id="ch-gap">&mdash;</span>
+          <span class="chan-hint">req &minus; gen &middot; &gt;0 = under-reach</span>
+        </div>
+        <div class="chan">
+          <span class="chan-label">Latency</span>
+          <span class="chan-val" id="ch-lat">&mdash;</span>
+          <span class="chan-hint">per run</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- SQL EXAMPLE PANEL: what the agent generated at this run; the learned fix -->
+    <section class="example" aria-label="SQL example">
+      <div class="ex-head">
+        <h2>What the agent generated <span class="muted">&middot; run <span id="ex-run">&mdash;</span></span></h2>
+        <span class="verdict" id="ex-verdict">&mdash;</span>
+      </div>
+      <div class="ex-meta">
+        <span class="pill" id="ex-db">db</span>
+        <span class="ex-q" id="ex-question">&mdash;</span>
+      </div>
+      <div class="ex-sql">
+        <div class="sql-block">
+          <div class="sql-label">agent SQL</div>
+          <pre id="ex-generated">&mdash;</pre>
+        </div>
+        <div class="sql-block learned" id="ex-learned-block" hidden>
+          <div class="sql-label learned-label">
+            &#10010; teacher&rsquo;s corrected SQL
+            <span class="muted">&middot; learned at run <span id="ex-learned-at">&mdash;</span></span>
+          </div>
+          <pre id="ex-learned">&mdash;</pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

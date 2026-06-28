@@ -29,3 +29,30 @@ FastAPI serving one HTML page with Chart.js polling an endpoint that reads event
 ---
 ## FLEXIBLE — Yiwen's notes (add freely below)
 <!-- chart choices, polling interval, layout, how you animate the replay... -->
+
+### Decisions (locked with Yiwen)
+- **Replay model:** front-end replay. Backend reads the log once via `read_events` and serves
+  the full precomputed series; the front-end reveals it cursor-by-cursor (no polling for the
+  mock demo). Swap to a poll/tail at integration against a live-growing `events.jsonl`.
+- **Recovery curve strata:** bold **overall** windowed line (the V) + a combined **hard/extra**
+  line (the money shot); **easy/medium** faint, baseline-only. A stratum line renders only while
+  that difficulty is present in the trailing window (so easy fades out after the change-point).
+- **Example panel:** verdict derived from `execution_accuracy` + `query_valid`
+  (correct / valid_but_wrong / invalid). The "learned" beat pairs a failing record with the
+  teacher's `correct_sql` from the correction event, matched by question text.
+- **Window:** 20 runs.
+
+### Phase A — backend (DONE)
+- `viewer/app.py`. Server-side windowing (math in Python, thin JS). Reads via
+  `contracts.eventlog.read_events` only.
+- `GET /api/state` → `{window, n_runs, log, runs[], drift, correction}`.
+  - `runs[k]` = snapshot as of run k: `run_index, run_id, difficulty, is_hard, accuracy_raw,
+    valid, acc_overall, acc_hard, acc_easy, validity_rate, complexity_gap, latency_ms,
+    question, generated_sql, db_id, verdict`. `acc_hard`/`acc_easy` are null when that stratum
+    isn't active in the window.
+  - `drift` / `correction` carry `at` = run-count when they fired (x-position for the markers);
+    `correction.examples` = the teacher's few-shot pairs for the example panel.
+- `GET /` = placeholder page (real UI in Phase B).
+- Log path: defaults to `fixtures/mock_events.jsonl`; override with `VIEWER_LOG` env var
+  (point at `events.jsonl` at integration).
+- Run: `.venv/bin/uvicorn viewer.app:app --reload` (note: `:8000` may be busy — use `--port 8011`).

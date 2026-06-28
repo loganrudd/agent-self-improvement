@@ -12,3 +12,7 @@ dependencies = [
 
 [tool.setuptools]
 packages = ["contracts", "harness", "detector", "correction", "viewer"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["detector/tests", "harness/tests", "correction/tests", "viewer/tests"]

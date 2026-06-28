@@ -5,12 +5,15 @@ Only called on confirmed failures — off the hot path.
 """
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
 
 from .contracts import FailedRun
+
+log = logging.getLogger(__name__)
 
 try:
     import google.generativeai as genai
@@ -32,7 +35,9 @@ def repair(failed: FailedRun, db_path: Optional[Path] = None) -> str:
         prompt = _build_prompt(failed, iteration, history)
         try:
             sql_candidate = _extract_sql(_call_model(prompt))
-        except Exception:
+        except Exception as e:
+            log.warning("repair: model call failed on iter %d for run %s: %s",
+                        iteration, failed.run_id, e)
             break
 
         if not sql_candidate:
@@ -49,6 +54,9 @@ def repair(failed: FailedRun, db_path: Optional[Path] = None) -> str:
             if sql_candidate.strip().upper().startswith("SELECT"):
                 return best_sql
 
+    if best_sql == failed.broken_sql:
+        log.warning("repair: could not improve SQL for run %s (returning broken_sql unchanged)",
+                    failed.run_id)
     return best_sql
 
 
