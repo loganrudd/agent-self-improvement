@@ -150,6 +150,26 @@ class TestSplitHardByDb:
                 f"held-out question on {q['db_id']} has no matching LEARN example"
             )
 
+    def test_fractional_heldout_with_large_pool(self):
+        """With a large per-DB pool, ~40% go to held-out and the rest to LEARN."""
+        import random
+        pool = self._pool({"db_big": 20})   # 20 Qs → int(20*0.4)=8 held-out, 12 learn
+        learn, held = _split_hard_by_db(pool, random.Random(0), heldout_frac=0.4)
+        assert len(held) == 8
+        assert len(learn) == 12
+
+    def test_every_heldout_has_same_db_in_learn_fractional(self):
+        """Core invariant holds with fractional split: every held-out Q has a same-DB LEARN sibling."""
+        import random
+        pool = self._pool({"db_a": 10, "db_b": 8, "db_c": 6, "db_solo": 1})
+        learn, held = _split_hard_by_db(pool, random.Random(0), heldout_frac=0.4)
+        learn_dbs = {q["db_id"] for q in learn}
+        for q in held:
+            assert q["db_id"] in learn_dbs, (
+                f"held-out question on {q['db_id']} has no matching LEARN example"
+            )
+        assert "db_solo" not in {q["db_id"] for q in held}
+
     def test_same_db_split_flag_in_build_stream(self):
         """build_stream with same_db_split=True produces valid disjoint phases."""
         easy = [{"id": f"e{i}", "question": "q", "expected_sql": "SELECT 1",

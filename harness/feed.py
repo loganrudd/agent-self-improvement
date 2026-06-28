@@ -38,13 +38,16 @@ def _split_hard(
 
 
 def _split_hard_by_db(
-    hard_extra: list[dict], rng: random.Random
+    hard_extra: list[dict], rng: random.Random, heldout_frac: float = 0.4
 ) -> tuple[list[dict], list[dict]]:
-    """DB-aware leave-one-out split.
+    """DB-aware fractional split.
 
-    For each database that has ≥2 hard/extra questions: one question goes to HELD-OUT,
-    the rest go to LEARN. This guarantees every HELD-OUT question has at least one
-    same-DB question in LEARN that correction can use as a schema-relevant few-shot example.
+    For each database with ≥2 hard/extra questions: `heldout_frac` of its questions
+    (min 1) go to HELD-OUT, the rest go to LEARN. This guarantees every HELD-OUT question
+    has at least one same-DB question in LEARN for schema-relevant few-shot examples.
+
+    At heldout_frac=0.4 with 8 concentrated DBs: ~50 held-out, ~80 LEARN — large enough
+    for statistically meaningful accuracy comparisons.
 
     Single-question databases go entirely to LEARN — they cannot contribute a same-DB
     example to HELD-OUT, so testing them would not demonstrate the relevance mechanism.
@@ -61,8 +64,9 @@ def _split_hard_by_db(
         else:
             shuffled = qs.copy()
             rng.shuffle(shuffled)
-            heldout.append(shuffled[0])   # one held-out for benchmarking
-            learn.extend(shuffled[1:])    # rest are potential few-shot sources
+            n_held = max(1, int(len(shuffled) * heldout_frac))
+            heldout.extend(shuffled[:n_held])
+            learn.extend(shuffled[n_held:])
     return learn, heldout
 
 
@@ -74,6 +78,7 @@ def build_stream(
     seed: int = 42,
     learn_frac: float = 0.5,
     same_db_split: bool = False,
+    db_heldout_frac: float = 0.4,
 ) -> list[FeedItem]:
     """Pre-compute the full demo stream. Call once; replay fast.
 
@@ -95,7 +100,7 @@ def build_stream(
         raise ValueError("No hard/extra questions — run fixtures/prepare_spider.py first")
 
     if same_db_split:
-        learn_pool, heldout_pool = _split_hard_by_db(hard_extra, rng)
+        learn_pool, heldout_pool = _split_hard_by_db(hard_extra, rng, heldout_frac=db_heldout_frac)
     else:
         learn_pool, heldout_pool = _split_hard(hard_extra, learn_frac, rng)
 
