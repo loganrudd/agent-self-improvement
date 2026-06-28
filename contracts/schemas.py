@@ -73,6 +73,7 @@ class TelemetryRecord(BaseModel):
     generated_sql: str = ""
     db_id: str = ""
     config_id: str = ""                                      # which AgentConfig produced this run
+    reasoning: str = ""                                      # raw <think> block (MiniMax M-series), empty for non-reasoning models
 
     @property
     def complexity_gap(self) -> int:

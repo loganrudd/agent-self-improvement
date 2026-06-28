@@ -89,12 +89,18 @@ def _clean_response(text: str) -> str:
     return _strip_fences(_strip_think(text))
 
 
+def _extract_think(text: str) -> str:
+    """Return the raw content of the first <think>...</think> block, or empty string."""
+    m = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
+    return m.group(1).strip() if m else ""
+
+
 def generate_sql(
     question: str,
     schema: str,
     config: AgentConfig,
-) -> tuple[str, int, float]:
-    """Returns (sql, tokens, latency_ms). sql may be an error comment on failure."""
+) -> tuple[str, int, float, str]:
+    """Returns (sql, tokens, latency_ms, reasoning). sql may be an error comment on failure."""
     t0 = time.time()
     try:
         client = _get_client()
@@ -107,10 +113,13 @@ def generate_sql(
             ],
             temperature=0.0,
         )
-        sql = _clean_response(response.choices[0].message.content or "")
+        raw = response.choices[0].message.content or ""
+        reasoning = _extract_think(raw)
+        sql = _clean_response(raw)
         tokens = response.usage.total_tokens if response.usage else 0
     except Exception as e:
         sql = f"-- error: {e}"
+        reasoning = ""
         tokens = 0
     latency_ms = (time.time() - t0) * 1000
-    return sql, tokens, latency_ms
+    return sql, tokens, latency_ms, reasoning

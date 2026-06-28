@@ -30,7 +30,7 @@ def _active_config(base: AgentConfig) -> AgentConfig:
 def run_item(item: FeedItem, config: AgentConfig) -> TelemetryRecord:
     db_path = get_db_path(item.db_id)
     schema = schema_text(db_path)
-    sql, tokens, latency_ms = agent.generate_sql(item.question, schema, config)
+    sql, tokens, latency_ms, reasoning = agent.generate_sql(item.question, schema, config)
     acc = evaluator.execution_accuracy(sql, item.gold_sql, db_path)
     valid = evaluator.query_valid(sql, db_path)
     gen_cx = evaluator.complexity(sql)
@@ -49,6 +49,7 @@ def run_item(item: FeedItem, config: AgentConfig) -> TelemetryRecord:
         generated_sql=sql,
         db_id=item.db_id,
         config_id=config.config_id,
+        reasoning=reasoning,
     )
 
 
