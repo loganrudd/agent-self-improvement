@@ -222,6 +222,50 @@ function updateChannels(r) {
   lat.textContent = Math.round(r.latency_ms) + " ms";
 }
 
+/* --- reasoning panel --------------------------------------------------------
+   Splits reasoning text into steps on double-newlines (model uses paragraph
+   breaks naturally). Highlights any step that cites the few-shot examples. */
+function parseReasoningSteps(text) {
+  if (!text || !text.trim()) return [];
+  return text.split(/\n\n+/).map(s => s.replace(/\n/g, " ").trim()).filter(Boolean);
+}
+
+const FEW_SHOT_CUES = ["few-shot", "few shot", "example in", "example:", "example solution", "as shown", "in the example"];
+
+function stepHasFewShotCue(s) {
+  const low = s.toLowerCase();
+  return FEW_SHOT_CUES.some(c => low.includes(c));
+}
+
+function updateReasoningPanel(r, k) {
+  document.getElementById("r-run").textContent = k;
+  const steps = parseReasoningSteps(r.reasoning || "");
+  const ol = document.getElementById("reasoning-steps");
+  const badge = document.getElementById("r-badge");
+
+  badge.className = "reasoning-badge";
+  badge.textContent = "";
+
+  if (!steps.length) {
+    ol.innerHTML = '<li class="reasoning-step muted">No reasoning captured for this run.</li>';
+    return;
+  }
+
+  const hasFewShot = steps.some(stepHasFewShotCue);
+  ol.innerHTML = steps.map(s => {
+    const cls = stepHasFewShotCue(s) ? "reasoning-step highlight" : "reasoning-step";
+    return `<li class="${cls}">${s.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</li>`;
+  }).join("");
+
+  if (hasFewShot) {
+    badge.className = "reasoning-badge learned";
+    badge.textContent = "✓ cites learned example";
+  } else if (r.verdict === "valid_but_wrong" || r.verdict === "invalid") {
+    badge.className = "reasoning-badge failed";
+    badge.textContent = "✗ reasoning led to wrong SQL";
+  }
+}
+
 function updateSqlPanel(r, k) {
   document.getElementById("ex-run").textContent = k;
   document.getElementById("ex-db").textContent = r.db_id;
@@ -252,6 +296,7 @@ function setCurrentRun(k) {
   document.getElementById("scrub-diff").textContent = r.difficulty;
   document.getElementById("scrub").value = k;
   updateChannels(r);
+  updateReasoningPanel(r, k);
   updateSqlPanel(r, k);
   if (chart) {
     for (const key in BRIGHT_IDX) {

@@ -233,6 +233,67 @@ html, body {
   color: var(--faint);
 }
 
+/* --- reasoning panel --- */
+.reasoning-panel {
+  margin-top: 1.1rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1rem 1.25rem 1.2rem;
+}
+.reasoning-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: .75rem;
+}
+.reasoning-head h2 { margin: 0; font-size: 1.02rem; font-weight: 600; }
+.reasoning-badge {
+  font-size: .8rem;
+  font-weight: 600;
+  padding: .2rem .6rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  display: none;
+}
+.reasoning-badge.learned {
+  display: inline;
+  color: var(--c-correct);
+  border-color: var(--c-correct);
+  background: rgba(63,185,80,.08);
+}
+.reasoning-badge.failed {
+  display: inline;
+  color: var(--c-drift);
+  border-color: var(--c-drift);
+  background: rgba(248,81,73,.08);
+}
+.reasoning-steps {
+  margin: 0;
+  padding: 0 0 0 1.4rem;
+  list-style: decimal;
+  display: flex;
+  flex-direction: column;
+  gap: .45rem;
+}
+.reasoning-step {
+  font-size: .9rem;
+  line-height: 1.6;
+  color: var(--text);
+  padding: .5rem .75rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  transition: border-color .2s;
+}
+.reasoning-step.highlight {
+  border-color: var(--c-correct);
+  background: rgba(63,185,80,.05);
+}
+.reasoning-step.muted { color: var(--muted); }
+
 /* --- SQL example panel --- */
 .example {
   margin-top: 1.1rem;

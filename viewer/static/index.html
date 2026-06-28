@@ -75,6 +75,17 @@
       </div>
     </section>
 
+    <!-- REASONING PANEL: the agent's chain-of-thought for this run -->
+    <section class="reasoning-panel" aria-label="Agent reasoning">
+      <div class="reasoning-head">
+        <h2>How the agent reasoned <span class="muted">&middot; run <span id="r-run">&mdash;</span></span></h2>
+        <span class="reasoning-badge" id="r-badge"></span>
+      </div>
+      <ol class="reasoning-steps" id="reasoning-steps">
+        <li class="reasoning-step muted">No reasoning captured for this run.</li>
+      </ol>
+    </section>
+
     <!-- SQL EXAMPLE PANEL: what the agent generated at this run; the learned fix -->
     <section class="example" aria-label="SQL example">
       <div class="ex-head">

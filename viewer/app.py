@@ -114,6 +114,7 @@ def build_state(path: Path | str = None, window: int = WINDOW) -> dict:
                 "generated_sql": ev.generated_sql,
                 "db_id": ev.db_id,
                 "verdict": _verdict(ev),
+                "reasoning": getattr(ev, "reasoning", ""),
             })
             seen_runs += 1
 
