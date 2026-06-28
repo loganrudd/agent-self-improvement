@@ -9,6 +9,7 @@ Phases:
 from __future__ import annotations
 
 import time
+from collections import Counter, deque
 from enum import Enum, auto
 
 from contracts.schemas import Difficulty, DriftEvent, FailureMode, TelemetryRecord
@@ -39,6 +40,19 @@ def _is_outage_record(record: TelemetryRecord) -> bool:
     return not record.query_valid and record.generated_sql.startswith(OUTAGE_SQL_PREFIX)
 
 
+def _classify_failure(record: TelemetryRecord) -> FailureMode:
+    """Classify one run by failure kind.
+
+    Failure = strict execution_accuracy == 0 (binary mock; Decision 6).
+    - acc != 0          -> NONE (not a failure)
+    - acc == 0, invalid -> INVALID_SQL  (SQL didn't parse/run)
+    - acc == 0, valid   -> VALID_BUT_WRONG (ran, returned wrong result set)
+    """
+    if record.execution_accuracy != 0.0:
+        return FailureMode.NONE
+    return FailureMode.INVALID_SQL if not record.query_valid else FailureMode.VALID_BUT_WRONG
+
+
 class Detector:
     """Stateful single-pass drift detector over a TelemetryRecord stream.
 
@@ -60,6 +74,7 @@ class Detector:
             d: RollingStats(maxlen=self._cfg.window) for d in Difficulty
         }
         self._breach_streak: int = 0
+        self._record_window: deque[TelemetryRecord] = deque(maxlen=self._cfg.window)
 
     # ------------------------------------------------------------------
     # Public API
@@ -75,6 +90,7 @@ class Detector:
         # the window is warm by the time the baseline freezes).
         self._acc_window.push(record.execution_accuracy)
         self._strat_windows[record.difficulty].push(record.execution_accuracy)
+        self._record_window.append(record)
 
         if self._state is _State.WARMUP:
             return self._handle_warmup(record)
