@@ -30,7 +30,8 @@ let CORR_BY_Q = {}; // question -> teacher's corrected SQL (from the correction 
 let POINTS = {}; // full {x,y} arrays per stratum (sliced for the bright reveal)
 
 // the bright (revealed) datasets, by stratum -> index into chart.data.datasets
-const BRIGHT_IDX = { acc_easy: 3, acc_overall: 4, acc_hard: 5 };
+// order: [sota(0), faint easy(1), faint overall(2), faint hard(3), bright easy(4), bright overall(5), bright hard(6)]
+const BRIGHT_IDX = { acc_easy: 4, acc_overall: 5, acc_hard: 6 };
 
 // replay transport
 let playing = false;
@@ -42,6 +43,23 @@ const VERDICT = {
   correct: "✓ correct",
   valid_but_wrong: "⚠ valid · wrong result",
   invalid: "✗ invalid SQL",
+};
+
+/* --- custom plugin: horizontal SOTA reference label (right edge of chart) -- */
+const sotaLabel = {
+  id: "sotaLabel",
+  afterDatasetsDraw(chart) {
+    const { ctx, chartArea: area, scales } = chart;
+    const y = scales.y.getPixelForValue(SPIDER_SOTA);
+    if (y < area.top || y > area.bottom) return;
+    ctx.save();
+    ctx.font = "500 11px ui-sans-serif, system-ui, sans-serif";
+    ctx.fillStyle = COL.muted;
+    ctx.textBaseline = "bottom";
+    ctx.textAlign = "right";
+    ctx.fillText("Spider 1.0 SOTA 91%", area.right - 4, y - 3);
+    ctx.restore();
+  },
 };
 
 /* --- custom plugin: vertical event marks (drift / correction) ------------- */
@@ -151,6 +169,8 @@ function buildLegend() {
     .join("");
 }
 
+const SPIDER_SOTA = 0.91; // Spider 1.0 SOTA execution accuracy (test set, blended difficulties)
+
 /* --- caption: a one-line, data-driven framing of the V -------------------- */
 function buildCaption(state) {
   const runs = state.runs;
@@ -159,10 +179,14 @@ function buildCaption(state) {
   const valley = Math.min(...hard);
   const final = hard[hard.length - 1];
   const n = state.correction ? state.correction.examples.length : 0;
+  const gapClosed = final - valley;
+  const gapToSota = SPIDER_SOTA - valley;
+  const pctClosed = gapToSota > 0 ? Math.round((gapClosed / gapToSota) * 100) : 0;
   return (
     `Hard-query accuracy collapsed to ${pct(valley)} under the harder distribution, ` +
     `then recovered to ${pct(final)} — same difficulty — after the agent learned ` +
-    `${n} example${n === 1 ? "" : "s"} from its own failures.`
+    `${n} example${n === 1 ? "" : "s"} from its own failures. ` +
+    `That autonomously closed ${pctClosed}% of the gap to Spider 1.0 SOTA (${pct(SPIDER_SOTA)}, blended).`
   );
 }
 
@@ -232,16 +256,15 @@ function updateSqlPanel(r, k) {
   badge.textContent = VERDICT[r.verdict] || r.verdict;
   badge.className = "verdict " + r.verdict;
 
-  // the teacher's fix exists only after correction fired, and only for learned questions
-  const corr = STATE.correction;
-  const learned = corr && k >= corr.at ? CORR_BY_Q[r.question] : null;
-  const block = document.getElementById("ex-learned-block");
-  if (learned) {
-    document.getElementById("ex-learned").textContent = learned;
-    document.getElementById("ex-learned-at").textContent = corr.at;
-    block.hidden = false;
+  // show how many same-DB learned examples the agent had available for this schema
+  const n = r.same_db_examples_active || 0;
+  const activeEl = document.getElementById("ex-active");
+  if (n > 0) {
+    document.getElementById("ex-active-count").textContent = n;
+    document.getElementById("ex-active-plural").textContent = n === 1 ? "" : "s";
+    activeEl.hidden = false;
   } else {
-    block.hidden = true;
+    activeEl.hidden = true;
   }
 }
 
@@ -354,11 +377,26 @@ function render(state) {
       anchor: "bottom",
     });
 
+  // Static SOTA reference line — constant across all runs
+  const sotaData = state.runs.map((r) => ({ x: r.run_index, y: SPIDER_SOTA }));
+
   chart = new Chart(document.getElementById("curve"), {
     type: "line",
     data: {
-      // order must match BRIGHT_IDX: [faint easy, faint overall, faint hard, bright easy, bright overall, bright hard]
+      // order must match BRIGHT_IDX: [sota, faint easy, faint overall, faint hard, bright easy, bright overall, bright hard]
       datasets: [
+        {
+          label: "Spider 1.0 SOTA (blended)",
+          data: sotaData,
+          borderColor: withAlpha(COL.muted, 0.45),
+          borderWidth: 1,
+          borderDash: [6, 5],
+          pointRadius: 0,
+          pointHitRadius: 0,
+          tension: 0,
+          spanGaps: true,
+          _faint: true, // exclude from tooltip (same flag as faint strata)
+        },
         faintDS("acc_easy", COL.easy, 1.5, [4, 4]),
         faintDS("acc_overall", COL.overall, 2.5),
         faintDS("acc_hard", COL.hard, 3),
@@ -402,7 +440,7 @@ function render(state) {
         runCursor: { at: currentRun },
       },
     },
-    plugins: [eventMarks, runCursor],
+    plugins: [sotaLabel, eventMarks, runCursor],
   });
 
   initScrubber(state);

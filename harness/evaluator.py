@@ -1,21 +1,18 @@
 """Execution-based eval + complexity features.
 
 - execute(sql, db_path) -> rows | None  (None = invalid SQL)
-- execution_accuracy: compare generated rows vs gold rows AS SETS (order/dupe insensitive)
+- execution_accuracy: compare generated rows vs gold rows, order-aware when gold uses ORDER BY.
+  Matches Spider's official Test-Suite EX metric semantics:
+    * No ORDER BY in gold → compare as frozensets (row-order and duplicate insensitive).
+    * ORDER BY in gold    → compare as lists (order matters for top-k queries).
+    * Gold SQL fails       → skip (return None) so the record is excluded rather than inflated.
 - query_valid: did generated SQL execute without error
 - complexity(sql) -> int  joins + nesting count
-
-Gold-failure note: when gold SQL itself fails to execute, we return 1.0 and
-emit a warning. These records inflate accuracy — detector should be aware.
-To filter them: records where query_valid=True but gold failed will have
-generated_complexity != required_complexity in most cases, but there's no
-dedicated flag without a contract change. Count warnings in logs as a proxy.
 """
 from __future__ import annotations
 
 import re
 import sqlite3
-import sys
 
 
 def execute(sql: str, db_path: str) -> list[tuple] | None:
@@ -30,28 +27,38 @@ def execute(sql: str, db_path: str) -> list[tuple] | None:
         return None
 
 
-def _normalize(rows: list[tuple]) -> frozenset:
-    return frozenset(
-        tuple(str(v).strip().lower() if v is not None else "" for v in row)
-        for row in rows
-    )
+def _has_order_by(sql: str) -> bool:
+    return bool(re.search(r"\bORDER\s+BY\b", sql, re.IGNORECASE))
 
 
-# Module-level counter so callers can check inflation rate
-gold_failure_count = 0
+def _normalize_row(row: tuple) -> tuple:
+    return tuple(str(v).strip().lower() if v is not None else "" for v in row)
 
 
-def execution_accuracy(generated_sql: str, gold_sql: str, db_path: str) -> float:
-    global gold_failure_count
+def execution_accuracy(generated_sql: str, gold_sql: str, db_path: str) -> float | None:
+    """Score one generated query against gold using Spider EX semantics.
+
+    Returns None when gold SQL itself fails — callers should exclude these records
+    from aggregate accuracy rather than counting them (avoids inflation).
+    """
     gen_rows = execute(generated_sql, db_path)
     gold_rows = execute(gold_sql, db_path)
+
+    if gold_rows is None:
+        return None  # gold is broken; exclude from aggregate — do not score 1.0
+
     if gen_rows is None:
         return 0.0
-    if gold_rows is None:
-        gold_failure_count += 1
-        print(f"[eval] WARN gold SQL failed ({gold_failure_count} total) — scoring 1.0, may inflate accuracy", file=sys.stderr)
-        return 1.0  # gold failed — can't penalize; logged above for detector awareness
-    return 1.0 if _normalize(gen_rows) == _normalize(gold_rows) else 0.0
+
+    norm_gen = [_normalize_row(r) for r in gen_rows]
+    norm_gold = [_normalize_row(r) for r in gold_rows]
+
+    if _has_order_by(gold_sql):
+        # Order matters: top-k queries, ranked results
+        return 1.0 if norm_gen == norm_gold else 0.0
+    else:
+        # Order-insensitive: match as multisets
+        return 1.0 if sorted(norm_gen) == sorted(norm_gold) else 0.0
 
 
 def query_valid(sql: str, db_path: str) -> bool:
