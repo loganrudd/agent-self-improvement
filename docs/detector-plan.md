@@ -62,7 +62,7 @@ detector/
 ## Phase 3 — Per-difficulty stratification
 **What:** Per-difficulty rolling windows in parallel with the overall one. Since difficulty is segmented, the baseline (easy/medium) has no hard/extra to compare against → stratification is **current-window accuracy split by difficulty, tracked over time** (the `hard 40%→80%` improvement curve). Detector surfaces the degraded value at fire time; viewer continues it through recovery.
 
-**Verify:** At fire time hard/extra ≈ 0.2–0.4 (easy/medium empty in degraded window); replay through recovery → hard/extra climb to ≈ 0.8. Unit test: mixed-difficulty window → each bucket mean correct.
+**Verify:** At fire time hard ≈ 0.0 / extra ≈ 0.20 (still filling at fire — only ~5 records each in their per-difficulty window); easy/medium ≈ 0.96 (frozen at baseline — no easy/medium records arrive post-change-point, so their per-difficulty deques stay at the last W baseline values). Replay to end → hard ≈ 0.92, extra ≈ 0.72 (recovery curve climbed). Unit test: mixed-difficulty window → each bucket mean correct; empty bucket omitted (not 0.0).
 
 **Decision 5 — where stratification lives:** **CLI/log output only** (frozen `DriftEvent` has no slot; won't hack the contract). Correction recovers difficulty via `failing_run_ids`; viewer stratifies telemetry itself.
 
