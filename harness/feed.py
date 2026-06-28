@@ -79,6 +79,7 @@ def build_stream(
     learn_frac: float = 0.5,
     same_db_split: bool = False,
     db_heldout_frac: float = 0.4,
+    baseline_easy_only: bool = False,
 ) -> list[FeedItem]:
     """Pre-compute the full demo stream. Call once; replay fast.
 
@@ -89,13 +90,22 @@ def build_stream(
     same_db_split=True uses _split_hard_by_db (leave-one-out per database) instead of a
     random fraction split. This guarantees every HELD-OUT question has at least one same-DB
     question in LEARN, making injected few-shot examples schema-relevant rather than noise.
+
+    baseline_easy_only=True draws the baseline phase from EASY questions only. On complex
+    schemas a weak base model fails ~50% of "medium" questions, so an easy+medium baseline
+    is noisy (~0.60) and dips far enough to false-trigger the drift detector BEFORE the
+    change-point. Easy-only gives the stable-high baseline the change-point story requires.
     """
     rng = random.Random(seed)
-    easy_med = [q for q in questions if q["difficulty"] in ("easy", "medium")]
+    baseline_difficulties = ("easy",) if baseline_easy_only else ("easy", "medium")
+    easy_med = [q for q in questions if q["difficulty"] in baseline_difficulties]
     hard_extra = [q for q in questions if q["difficulty"] in ("hard", "extra")]
 
     if not easy_med:
-        raise ValueError("No easy/medium questions — run fixtures/prepare_spider.py first")
+        raise ValueError(
+            f"No baseline questions ({'/'.join(baseline_difficulties)}) — "
+            "run fixtures/prepare_spider.py first"
+        )
     if not hard_extra:
         raise ValueError("No hard/extra questions — run fixtures/prepare_spider.py first")
 

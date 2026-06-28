@@ -222,6 +222,24 @@ class TestBuildStream:
         recovery = [i for i in items if i.phase == "recovery"]
         assert all(i.difficulty in ("hard", "extra") for i in recovery)
 
+    def test_baseline_easy_only_excludes_medium(self):
+        """baseline_easy_only=True draws the baseline phase from easy questions only."""
+        items = build_stream(self._questions(), n_baseline=20, n_degraded=5, n_recovery=5,
+                             baseline_easy_only=True)
+        baseline = [i for i in items if i.phase == "baseline"]
+        assert baseline, "baseline phase should be non-empty"
+        assert all(i.difficulty == "easy" for i in baseline), (
+            "easy-only baseline must not contain medium questions"
+        )
+
+    def test_baseline_easy_only_raises_if_no_easy(self):
+        """With no easy questions, easy-only baseline fails fast rather than firing on medium."""
+        questions = ([_make_q(f"m{i}", "medium") for i in range(5)]
+                     + [_make_q(f"h{i}", "hard") for i in range(5)])
+        with pytest.raises(ValueError, match="baseline questions"):
+            build_stream(questions, n_baseline=2, n_degraded=2, n_recovery=2,
+                         baseline_easy_only=True)
+
     def test_degraded_and_recovery_are_disjoint(self):
         """Core benchmark-credibility invariant: no question_id from the learn pool
         appears in the held-out recovery pool."""

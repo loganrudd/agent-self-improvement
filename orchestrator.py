@@ -47,6 +47,10 @@ def _build_feed(n: int, full: bool) -> list[FeedItem]:
 
     same_db_split=True: every HELD-OUT question has at least one same-DB question in
     LEARN, so injected examples are schema-relevant rather than cross-schema noise.
+
+    baseline_easy_only=True: the weak base fails ~50% of "medium" questions on these
+    complex schemas, so an easy+medium baseline is noisy enough to false-trigger drift
+    before the change-point. Easy-only gives a stable-high baseline (~0.77).
     """
     per_phase = 80 if full else n
     questions = load_questions()
@@ -57,6 +61,7 @@ def _build_feed(n: int, full: bool) -> list[FeedItem]:
         n_recovery=per_phase,
         seed=_SEED,
         same_db_split=True,
+        baseline_easy_only=True,
     )
 
 
