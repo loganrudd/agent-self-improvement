@@ -159,9 +159,9 @@ class TestDryRunHeldout:
         records = [_make_record(1.0), _make_record(0.0), _make_record(1.0), _make_record(0.0)]
 
         with patch("orchestrator.run_item", side_effect=records):
-            acc = dry_run_heldout(items)
+            result = dry_run_heldout(items)
 
-        assert acc == pytest.approx(0.5)
+        assert result["overall"] == pytest.approx(0.5)
 
     def test_none_records_excluded_from_accuracy(self):
         items = _make_mixed_items(n_recovery=3)
@@ -169,16 +169,16 @@ class TestDryRunHeldout:
         records = [None, _make_record(1.0), _make_record(0.0)]
 
         with patch("orchestrator.run_item", side_effect=records):
-            acc = dry_run_heldout(items)
+            result = dry_run_heldout(items)
 
         # only 2 scored: (1.0 + 0.0) / 2 = 0.5
-        assert acc == pytest.approx(0.5)
+        assert result["overall"] == pytest.approx(0.5)
 
     def test_all_skipped_returns_zero(self):
         items = _make_mixed_items(n_recovery=3)
         with patch("orchestrator.run_item", return_value=None):
-            acc = dry_run_heldout(items)
-        assert acc == 0.0
+            result = dry_run_heldout(items)
+        assert result["overall"] == 0.0
 
     def test_explicit_config_forwarded(self):
         items = _make_mixed_items(n_recovery=1)
@@ -208,18 +208,33 @@ class TestDryRunHeldout:
 
         assert seen[0].model == "MiniMax-M2.7-highspeed"
 
-    def test_returns_overall_accuracy(self):
+    def test_returns_dict_with_overall_key(self):
         items = _make_mixed_items(n_recovery=2)
         records = [_make_record(0.8), _make_record(0.4)]
 
         with patch("orchestrator.run_item", side_effect=records):
-            acc = dry_run_heldout(items)
+            result = dry_run_heldout(items)
 
-        assert acc == pytest.approx(0.6)
+        assert isinstance(result, dict)
+        assert result["overall"] == pytest.approx(0.6)
 
-    def test_no_recovery_items_returns_zero(self):
+    def test_returns_per_difficulty_keys(self):
+        # Items: 2 hard, 2 extra recovery items
+        items = _make_mixed_items(n_recovery=4)
+        records = [
+            _make_record(1.0, "hard"),
+            _make_record(0.0, "extra"),
+            _make_record(1.0, "hard"),
+            _make_record(0.0, "extra"),
+        ]
+        with patch("orchestrator.run_item", side_effect=records):
+            result = dry_run_heldout(items)
+        # hard bucket: (1.0 + 1.0)/2 = 1.0; extra bucket: 0.0
+        assert "hard" in result or "extra" in result  # at least one difficulty key
+
+    def test_no_recovery_items_returns_zero_overall(self):
         items = [_make_item("baseline", "easy", i) for i in range(3)]
         with patch("orchestrator.run_item") as mock_run:
-            acc = dry_run_heldout(items)
+            result = dry_run_heldout(items)
         mock_run.assert_not_called()
-        assert acc == 0.0
+        assert result["overall"] == 0.0

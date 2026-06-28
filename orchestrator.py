@@ -1,34 +1,37 @@
-"""Wires the full live loop. BUILT TOGETHER AT THE INTEGRATION CHECKPOINT (hr 5-6),
-not by one person in isolation (see .claude/rules/04-workflow.md).
+"""Wires the full live loop. BUILT TOGETHER AT THE INTEGRATION CHECKPOINT (hr 5-6).
 
-Intended flow once stages exist:
-    config = AgentConfig(config_id="c0", model=<weak tier>)        # few_shot_examples empty
-    detector = Detector(baseline_from=phase1)
-    for rec in harness.run_stream(config):       # harness emits TelemetryRecord
-        append_event(rec)
-        ev = detector.update(rec)                 # -> DriftEvent or None
-        if ev:
-            append_event(ev)
-            action = correction.handle(ev)        # -> CorrectionAction (learned examples)
-            append_event(action)
-            config.few_shot_examples += action.new_few_shot_examples   # THE FEEDBACK SPINE
-    # viewer tails events.jsonl throughout
+Flow:
+    Pass 1 (baseline + degraded): run agent item-by-item, feed records to the
+      detector; on DriftEvent, call correction to build few-shot examples and
+      append CorrectionAction to events.jsonl.
+    Pass 2 (recovery): run the held-out items; _active_config in the harness
+      re-reads the CorrectionAction each item so the agent has the learned examples.
+    Comparison: print held-out hard-bucket accuracy with vs without examples,
+      side-by-side — the unambiguous self-improvement signal.
 """
 from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
-from contracts.eventlog import DEFAULT_LOG
-from contracts.schemas import AgentConfig
+from contracts.eventlog import DEFAULT_LOG, append_event
+from contracts.schemas import AgentConfig, DriftEvent
+from correction.correction import handle as correction_handle
+from correction.learner import FailingCase
+from detector.config import DetectorConfig
+from detector.detector import Detector
 from harness.feed import FeedItem, build_stream
-from harness.runner import run_item
+from harness.runner import run_item, run_stream
 from harness.spider import load_questions
 
 _BASE_MODEL = "MiniMax-M2.7-highspeed"
 _SEED = 42  # fixed so dry-run-heldout and the live run measure the exact same pools
+
+# Number of easy baseline successes to inject as anti-forgetting anchors.
+_N_ANCHORS = 2
 
 
 # ---------------------------------------------------------------------------
@@ -103,12 +106,16 @@ def dry_run_heldout(
 
     all_accs = [a for accs in accs_by_diff.values() for a in accs]
     overall = sum(all_accs) / len(all_accs) if all_accs else 0.0
-
-    print(f"\n  overall : {overall:.3f}  ({n_scored} scored, {n_skipped} skipped — gold SQL failed)")
+    result: dict[str, float] = {"overall": overall}
     for diff in ("easy", "medium", "hard", "extra"):
         if diff in accs_by_diff:
             accs = accs_by_diff[diff]
-            print(f"  {diff:<8}: {sum(accs)/len(accs):.3f}  ({len(accs)} runs)")
+            result[diff] = sum(accs) / len(accs)
+
+    print(f"\n  overall : {overall:.3f}  ({n_scored} scored, {n_skipped} skipped — gold SQL failed)")
+    for diff in ("easy", "medium", "hard", "extra"):
+        if diff in result:
+            print(f"  {diff:<8}: {result[diff]:.3f}  ({len(accs_by_diff[diff])} runs)")
 
     if overall >= 0.7:
         print(
@@ -122,7 +129,223 @@ def dry_run_heldout(
             "Recovery improvement will be attributable to learned examples."
         )
 
-    return overall
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Step 5: two-pass live loop
+# ---------------------------------------------------------------------------
+
+def _make_base_config(run_suffix: str = "v0") -> AgentConfig:
+    return AgentConfig(
+        config_id=f"v0-base-{run_suffix}",
+        model=_BASE_MODEL,
+        few_shot_examples=[],
+    )
+
+
+def _build_failing_cases(
+    event: DriftEvent,
+    run_id_to_record_and_item: dict,
+) -> list[FailingCase]:
+    """Map event.failing_run_ids back to FailingCase bundles.
+
+    The orchestrator holds the emitted TelemetryRecord AND the FeedItem (which
+    carries gold_sql), so this requires no events.jsonl re-reading.
+    """
+    cases = []
+    for run_id in event.failing_run_ids:
+        entry = run_id_to_record_and_item.get(run_id)
+        if entry is None:
+            continue
+        rec, item = entry
+        cases.append(FailingCase(
+            run_id=run_id,
+            question=rec.question or item.question,
+            db_id=rec.db_id or item.db_id,
+            broken_sql=rec.generated_sql,
+            gold_sql=item.gold_sql,
+            difficulty=item.difficulty,
+        ))
+    return cases
+
+
+def _pick_anchors(
+    baseline_items: list[FeedItem],
+    baseline_records: list,
+    n: int = _N_ANCHORS,
+) -> list[FailingCase]:
+    """Pick n easy baseline successes as anti-forgetting anchors."""
+    anchors = []
+    for item, rec in zip(baseline_items, baseline_records):
+        if len(anchors) >= n:
+            break
+        if item.difficulty in ("easy", "medium") and rec.execution_accuracy == 1.0:
+            anchors.append(FailingCase(
+                run_id=rec.run_id,
+                question=rec.question or item.question,
+                db_id=rec.db_id or item.db_id,
+                broken_sql="",
+                gold_sql=item.gold_sql,
+                difficulty=item.difficulty,
+            ))
+    return anchors
+
+
+def _pass1(
+    items: list[FeedItem],
+    base_config: AgentConfig,
+    detector: Detector,
+    run_id_map: dict,
+    baseline_items_out: list,
+    baseline_recs_out: list,
+) -> DriftEvent | None:
+    """Run baseline + degraded items, feed detector, return DriftEvent when fired."""
+    drift_event: DriftEvent | None = None
+    pass1_items = [it for it in items if it.phase in ("baseline", "degraded")]
+    total = len(pass1_items)
+
+    print(f"\n[pass 1] {total} items (baseline + degraded) ...", flush=True)
+
+    for i, item in enumerate(pass1_items, 1):
+        rec = run_item(item, base_config)
+        if rec is None:
+            print(f"  [{i:>3}/{total}] [{item.phase:<9}] [{item.difficulty:<6}] SKIP", flush=True)
+            continue
+
+        append_event(rec)
+        run_id_map[rec.run_id] = (rec, item)
+
+        if item.phase == "baseline":
+            baseline_items_out.append(item)
+            baseline_recs_out.append(rec)
+
+        ev = detector.update(rec)
+        mark = "✓" if rec.execution_accuracy == 1.0 else "✗"
+        detector_tag = " 🔔DRIFT" if ev else ""
+        print(
+            f"  [{i:>3}/{total}] [{item.phase:<9}] [{item.difficulty:<6}] {mark}"
+            f"  {item.question[:50]}{detector_tag}",
+            flush=True,
+        )
+
+        if ev and drift_event is None:
+            drift_event = ev
+            append_event(ev)
+            print(
+                f"\n  [detector] Drift detected! channel={ev.channel}, "
+                f"severity={ev.severity:.3f}, "
+                f"failing_run_ids={ev.failing_run_ids}\n",
+                flush=True,
+            )
+
+    return drift_event
+
+
+def _pass2(
+    items: list[FeedItem],
+    base_config: AgentConfig,
+) -> list:
+    """Run recovery items. _active_config in the harness reads the CorrectionAction."""
+    recovery_items = [it for it in items if it.phase == "recovery"]
+    total = len(recovery_items)
+    print(f"\n[pass 2] {total} held-out items (recovery, with learned examples) ...", flush=True)
+    records = run_stream(recovery_items, base_config)
+    return records
+
+
+def _print_comparison(
+    recovery_records: list,
+    base_accs: dict[str, float],
+    diff: str = "hard",
+) -> None:
+    """Print side-by-side hard-bucket accuracy with vs without examples."""
+    diff_recs = [r for r in recovery_records if r.difficulty.value == diff]
+    if not diff_recs:
+        print(f"\n[result] No {diff} recovery records to compare.")
+        return
+    with_acc = sum(r.execution_accuracy for r in diff_recs) / len(diff_recs)
+    without_acc = base_accs.get(diff, base_accs.get("overall", 0.0))
+    print(f"\n{'='*60}")
+    print(f"  Self-improvement result ({diff} bucket, held-out pool):")
+    print(f"    WITHOUT examples (base)  : {without_acc:.3f}")
+    print(f"    WITH examples (recovered): {with_acc:.3f}")
+    delta = with_acc - without_acc
+    sign = "+" if delta >= 0 else ""
+    print(f"    Delta                    : {sign}{delta:.3f}")
+    if delta > 0:
+        print(f"  ✓ Agent improved on {diff} queries after learning from its own failures.")
+    else:
+        print(f"  ✗ No improvement detected on {diff} queries.")
+    print("=" * 60, flush=True)
+
+
+def run_full_loop(items: list[FeedItem], log_path: Path) -> None:
+    """Execute the full two-pass self-improvement loop."""
+    base_config = _make_base_config()
+    detector = Detector(DetectorConfig())
+
+    # Map run_id -> (TelemetryRecord, FeedItem) so correction can build FailingCase bundles.
+    run_id_map: dict = {}
+    baseline_items: list = []
+    baseline_recs: list = []
+
+    # -------------------------------------------------------------------------
+    # Pass 1: baseline + degraded — detect drift, fire correction
+    # -------------------------------------------------------------------------
+    drift_event = _pass1(
+        items, base_config, detector, run_id_map, baseline_items, baseline_recs
+    )
+
+    if drift_event is None:
+        print(
+            "\n[orchestrator] WARNING: no drift detected after pass 1. "
+            "Try --full to run more records (detector needs baseline_len=40 + window=25).",
+            file=sys.stderr,
+        )
+        # Still run pass 2 so the log has recovery telemetry; just no correction.
+    else:
+        # -----------------------------------------------------------------
+        # Correction: build examples from failing cases + easy anchors
+        # -----------------------------------------------------------------
+        print("[correction] Building few-shot examples from failing cases ...", flush=True)
+        failing_cases = _build_failing_cases(drift_event, run_id_map)
+        anchor_cases = _pick_anchors(baseline_items, baseline_recs)
+        print(
+            f"  {len(failing_cases)} failing cases, {len(anchor_cases)} anchors",
+            flush=True,
+        )
+        action = correction_handle(drift_event, failing_cases, anchor_cases)
+        append_event(action)
+        print(
+            f"  CorrectionAction: {len(action.new_few_shot_examples)} examples — "
+            f"{sum(1 for e in action.new_few_shot_examples if e.source == 'teacher')} teacher, "
+            f"{sum(1 for e in action.new_few_shot_examples if e.source == 'gold')} gold, "
+            f"{sum(1 for e in action.new_few_shot_examples if e.source == 'anchor')} anchor",
+            flush=True,
+        )
+        print(f"  rationale: {action.rationale}", flush=True)
+
+    # -------------------------------------------------------------------------
+    # Measure base accuracy on held-out WITHOUT examples (contamination-free)
+    # -------------------------------------------------------------------------
+    print(
+        "\n[orchestrator] Measuring base (no-correction) accuracy on held-out pool ...",
+        flush=True,
+    )
+    base_accs = dry_run_heldout(items)
+
+    # -------------------------------------------------------------------------
+    # Pass 2: recovery — agent reads CorrectionAction via _active_config
+    # -------------------------------------------------------------------------
+    recovery_records = _pass2(items, base_config)
+
+    # -------------------------------------------------------------------------
+    # Print the improvement claim (hard bucket is the benchmark — see plan 006)
+    # -------------------------------------------------------------------------
+    _print_comparison(recovery_records, base_accs=base_accs, diff="hard")
+
+    print(f"\n[orchestrator] events.jsonl written to {log_path}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +373,13 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--dry-run-degraded", action="store_true",
+        help=(
+            "Run only the degraded (LEARN) pool at base config; print accuracy. "
+            "Confirms the detector will fire before committing to a full --full run."
+        ),
+    )
+    p.add_argument(
         "--fresh", action="store_true",
         help=(
             "Truncate events.jsonl before a real run so stale correction events "
@@ -171,10 +401,33 @@ if __name__ == "__main__":
         dry_run_heldout(items)
         sys.exit(0)
 
+    if args.dry_run_degraded:
+        base_cfg = _make_base_config("dry-degraded")
+        degraded = [it for it in items if it.phase == "degraded"]
+        total = len(degraded)
+        accs: list[float] = []
+        print(f"[dry-run-degraded] {total} degraded items, base config ...", flush=True)
+        for i, item in enumerate(degraded, 1):
+            rec = run_item(item, base_cfg)
+            if rec is None:
+                print(f"  [{i:>3}/{total}] SKIP (gold failed)", flush=True)
+                continue
+            accs.append(rec.execution_accuracy)
+            mark = "✓" if rec.execution_accuracy == 1.0 else "✗"
+            print(f"  [{i:>3}/{total}] [{item.difficulty:<6}] {mark}  {item.question[:55]}", flush=True)
+        if accs:
+            avg = sum(accs) / len(accs)
+            print(f"\n  degraded accuracy: {avg:.3f} ({len(accs)} runs)")
+            if avg <= 0.70:
+                print("  ✓ Degraded accuracy low — detector should fire during a full run.")
+            else:
+                print("  ✗ Degraded accuracy high — drift may not fire. Check feed configuration.")
+        sys.exit(0)
+
+    log_path = Path(DEFAULT_LOG)
     if args.fresh:
-        log = Path(DEFAULT_LOG)
-        if log.exists():
-            log.unlink()
+        if log_path.exists():
+            log_path.unlink()
             print(f"[orchestrator] {DEFAULT_LOG} cleared (--fresh).")
 
-    raise SystemExit("TODO(team): full two-pass loop — see plan 006 Step 5")
+    run_full_loop(items, log_path)
