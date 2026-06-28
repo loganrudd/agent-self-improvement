@@ -287,3 +287,113 @@ class Detector:
             )
 
         return None
+
+
+# ---------------------------------------------------------------------------
+# run() orchestration (Step 3)
+# ---------------------------------------------------------------------------
+
+def run(args: object) -> int:
+    """Drive the detector end-to-end from parsed CLI args.  Returns exit code."""
+    from contracts.eventlog import append_event
+
+    input_path = Path(args.input)
+
+    # --- edge case: missing or empty input ---
+    if not input_path.exists():
+        print(f"[detector] error: input file not found: {input_path}", file=sys.stderr)
+        return 2
+    if input_path.stat().st_size == 0:
+        print(f"[detector] error: input file is empty: {input_path}", file=sys.stderr)
+        return 2
+
+    cfg = DetectorConfig(
+        window=args.window,
+        baseline_len=args.baseline,
+        drop_threshold=args.drop_threshold,
+        failing_ids_cap=args.cap,
+    )
+
+    det = Detector(cfg)
+    event: DriftEvent | None = None
+    fire_index: int | None = None
+    strat: dict = {}
+    n_records = 0
+
+    for record in load_telemetry(input_path, fmt=args.format):
+        n_records += 1
+        ev = det.update(record)
+        if ev is not None and event is None:
+            event = ev
+            fire_index = n_records - 1   # 0-based index of the firing record
+            strat = det.stratified_means()
+
+    # --- edge case: too few records to establish a baseline ---
+    if det._state is _State.WARMUP:
+        print(
+            f"[detector] error: need ≥ {cfg.baseline_len} records to establish a "
+            f"baseline, got {n_records}",
+            file=sys.stderr,
+        )
+        return 2
+
+    print_summary(
+        n_records=n_records,
+        baseline=det._baseline,
+        event=event,
+        fire_index=fire_index,
+        strat=strat,
+    )
+
+    if event is not None:
+        append_event(event, path=args.output)
+        print(f"[detector] DriftEvent appended to {args.output}")
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# argparse + main() (Step 4)
+# ---------------------------------------------------------------------------
+
+def build_arg_parser() -> "argparse.ArgumentParser":
+    import argparse
+    from contracts.eventlog import DEFAULT_LOG
+
+    _d = DetectorConfig()
+    p = argparse.ArgumentParser(
+        prog="python -m detector.detector",
+        description="Windowed drift detector. Reads TelemetryRecord JSONL, "
+                    "emits a DriftEvent to events.jsonl on first sustained drop. "
+                    "Output is append-only — re-running stacks events.",
+    )
+    p.add_argument("--input", required=True, help="Path to JSONL input file.")
+    p.add_argument(
+        "--output", default=str(DEFAULT_LOG),
+        help=f"Path to event-log output (default: {DEFAULT_LOG}). Append-only.",
+    )
+    p.add_argument(
+        "--format", default="auto", choices=["auto", "raw", "events"],
+        help="Input format: 'raw' (bare TelemetryRecord), 'events' (typed envelope), "
+             "or 'auto' (sniff first line). Default: auto.",
+    )
+    p.add_argument("--window", type=int, default=_d.window,
+                   help=f"Rolling window size. Default: {_d.window}.")
+    p.add_argument("--baseline", type=int, default=_d.baseline_len,
+                   help=f"Warmup / baseline length. Default: {_d.baseline_len}.")
+    p.add_argument("--drop-threshold", type=float, default=_d.drop_threshold,
+                   help=f"Absolute accuracy drop to signal breach. Default: {_d.drop_threshold}.")
+    p.add_argument("--cap", type=int, default=_d.failing_ids_cap,
+                   help=f"Max failing run IDs to collect. Default: {_d.failing_ids_cap}.")
+    return p
+
+
+def main(argv=None) -> int:
+    import argparse
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    return run(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
