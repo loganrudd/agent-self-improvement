@@ -27,11 +27,16 @@ def _active_config(base: AgentConfig) -> AgentConfig:
     return base.model_copy(update={"few_shot_examples": latest.new_few_shot_examples})
 
 
-def run_item(item: FeedItem, config: AgentConfig) -> TelemetryRecord:
+def run_item(item: FeedItem, config: AgentConfig) -> TelemetryRecord | None:
+    """Return None when gold SQL itself fails — caller must exclude from aggregate."""
+    import sys
     db_path = get_db_path(item.db_id)
     schema = schema_text(db_path)
-    sql, tokens, latency_ms, reasoning = agent.generate_sql(item.question, schema, config)
+    sql, tokens, latency_ms, reasoning = agent.generate_sql(item.question, schema, config, db_id=item.db_id)
     acc = evaluator.execution_accuracy(sql, item.gold_sql, db_path)
+    if acc is None:
+        print(f"  [SKIP] gold SQL failed for {item.question_id} — excluded from accuracy", file=sys.stderr)
+        return None
     valid = evaluator.query_valid(sql, db_path)
     gen_cx = evaluator.complexity(sql)
     req_cx = evaluator.complexity(item.gold_sql)
@@ -59,6 +64,8 @@ def run_stream(items: list[FeedItem], base_config: AgentConfig) -> list[Telemetr
         # re-read config each item so corrections take effect mid-stream
         config = _active_config(base_config)
         rec = run_item(item, config)
+        if rec is None:
+            continue  # gold SQL broken — excluded from telemetry and accuracy aggregate
         append_event(rec)
         records.append(rec)
         phase_label = f"[{item.phase:<9}]"
@@ -87,16 +94,22 @@ if __name__ == "__main__":
     print(f"Running {len(items)} questions ({n} per phase)...")
     records = run_stream(items, base_config)
     passed = sum(r.execution_accuracy == 1.0 for r in records)
-    print(f"\nDone. Passed: {passed}/{len(records)}")
+    skipped = len(items) - len(records)
+    print(f"\nDone. Passed: {passed}/{len(records)} scored  ({skipped} excluded — gold SQL failed)")
     by_phase: dict[str, list] = {}
-    for r, item in zip(records, items):
-        by_phase.setdefault(item.phase, []).append(r.execution_accuracy)
-    for phase, accs in by_phase.items():
+    for r in records:
+        by_phase.setdefault(r.difficulty.value if hasattr(r.difficulty, "value") else str(r.difficulty), [])
+    # group by phase using item metadata aligned to emitted records
+    phase_accs: dict[str, list] = {}
+    rec_iter = iter(records)
+    for item in items:
+        rec = next(rec_iter, None)
+        if rec is None:
+            break
+        phase_accs.setdefault(item.phase, []).append(rec.execution_accuracy)
+    for phase, accs in phase_accs.items():
         avg = sum(accs) / len(accs)
-        print(f"  {phase}: {avg:.2f} avg accuracy ({len(accs)} runs)")
+        print(f"  {phase}: {avg:.2f} avg accuracy ({len(accs)} runs, Spider EX metric)")
     api_errors = sum(1 for r in records if r.generated_sql.startswith("-- error:"))
-    gold_fails = evaluator.gold_failure_count
     if api_errors:
         print(f"  WARNING: {api_errors} API-error records (outage, not drift) — query_valid=False on these")
-    if gold_fails:
-        print(f"  WARNING: {gold_fails} gold-SQL failures scored as 1.0 — may inflate accuracy")

@@ -59,11 +59,22 @@ _SYSTEM = (
 )
 
 
-def _build_prompt(question: str, schema: str, examples: list[FewShotExample]) -> str:
+def _build_prompt(
+    question: str, schema: str, examples: list[FewShotExample], db_id: str = ""
+) -> str:
     parts = [f"Schema:\n{schema}"]
     if examples:
-        shots = "\n\n".join(f"Q: {e.question}\nSQL: {e.correct_sql}" for e in examples[:16])
-        parts.append(f"Few-shot examples:\n{shots}")
+        # Only show examples for the same database — cross-schema SQL is pure noise
+        # because it references tables/columns that don't exist in the current schema.
+        relevant = (
+            [e for e in examples if not e.db_id or e.db_id == db_id]
+            if db_id else examples
+        )
+        if relevant:
+            shots = "\n\n".join(
+                f"Q: {e.question}\nSQL: {e.correct_sql}" for e in relevant[:16]
+            )
+            parts.append(f"Few-shot examples:\n{shots}")
     parts.append(f"Question: {question}\nSQL:")
     return "\n\n".join(parts)
 
@@ -99,12 +110,13 @@ def generate_sql(
     question: str,
     schema: str,
     config: AgentConfig,
+    db_id: str = "",
 ) -> tuple[str, int, float, str]:
     """Returns (sql, tokens, latency_ms, reasoning). sql may be an error comment on failure."""
     t0 = time.time()
     try:
         client = _get_client()
-        prompt = _build_prompt(question, schema, config.few_shot_examples)
+        prompt = _build_prompt(question, schema, config.few_shot_examples, db_id=db_id)
         response = client.chat.completions.create(
             model=config.model,
             messages=[

@@ -1,15 +1,18 @@
 """The change-point stratified feed (rules/02-tech-decisions.md).
 
 Phase 1 baseline: sample easy/medium.   --change-point-->
-Phase 2 degraded: sample hard/extra.
-Phase 3 recovery: keep sampling the SAME hard/extra pool (acc recovers via learned few-shots).
+Phase 2 degraded: sample hard/extra LEARN split (failures here become few-shot examples).
+Phase 3 recovery: sample hard/extra HELD-OUT split (disjoint — never used as few-shot source).
+
+The LEARN/HELD-OUT split is the key benchmark-credibility guarantee: the agent cannot
+regurgitate examples it was given — it must generalize to questions it has never seen.
 
 Fast REPLAY mode: pre-compute the full stream once, replay instantly on stage.
-Live change-point trigger: caller can swap phase by setting change_point_at.
 """
 from __future__ import annotations
 
 import random
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -24,14 +27,64 @@ class FeedItem:
     phase: str   # "baseline" | "degraded" | "recovery"
 
 
+def _split_hard(
+    hard_extra: list[dict], learn_frac: float, rng: random.Random
+) -> tuple[list[dict], list[dict]]:
+    """Shuffle and split hard/extra into disjoint LEARN and HELD-OUT sets."""
+    shuffled = hard_extra.copy()
+    rng.shuffle(shuffled)
+    cut = max(1, int(len(shuffled) * learn_frac))
+    return shuffled[:cut], shuffled[cut:]
+
+
+def _split_hard_by_db(
+    hard_extra: list[dict], rng: random.Random
+) -> tuple[list[dict], list[dict]]:
+    """DB-aware leave-one-out split.
+
+    For each database that has ≥2 hard/extra questions: one question goes to HELD-OUT,
+    the rest go to LEARN. This guarantees every HELD-OUT question has at least one
+    same-DB question in LEARN that correction can use as a schema-relevant few-shot example.
+
+    Single-question databases go entirely to LEARN — they cannot contribute a same-DB
+    example to HELD-OUT, so testing them would not demonstrate the relevance mechanism.
+    """
+    by_db: dict[str, list[dict]] = defaultdict(list)
+    for q in hard_extra:
+        by_db[q["db_id"]].append(q)
+
+    learn: list[dict] = []
+    heldout: list[dict] = []
+    for qs in by_db.values():
+        if len(qs) == 1:
+            learn.extend(qs)
+        else:
+            shuffled = qs.copy()
+            rng.shuffle(shuffled)
+            heldout.append(shuffled[0])   # one held-out for benchmarking
+            learn.extend(shuffled[1:])    # rest are potential few-shot sources
+    return learn, heldout
+
+
 def build_stream(
     questions: list[dict],
     n_baseline: int = 80,
     n_degraded: int = 80,
     n_recovery: int = 80,
     seed: int = 42,
+    learn_frac: float = 0.5,
+    same_db_split: bool = False,
 ) -> list[FeedItem]:
-    """Pre-compute the full demo stream. Call once; replay fast."""
+    """Pre-compute the full demo stream. Call once; replay fast.
+
+    hard/extra questions are split into disjoint LEARN (degraded phase, few-shot source)
+    and HELD-OUT (recovery phase, benchmark eval) sets. Recovery accuracy is therefore an
+    out-of-sample generalization claim, not memorisation of injected examples.
+
+    same_db_split=True uses _split_hard_by_db (leave-one-out per database) instead of a
+    random fraction split. This guarantees every HELD-OUT question has at least one same-DB
+    question in LEARN, making injected few-shot examples schema-relevant rather than noise.
+    """
     rng = random.Random(seed)
     easy_med = [q for q in questions if q["difficulty"] in ("easy", "medium")]
     hard_extra = [q for q in questions if q["difficulty"] in ("hard", "extra")]
@@ -40,6 +93,17 @@ def build_stream(
         raise ValueError("No easy/medium questions — run fixtures/prepare_spider.py first")
     if not hard_extra:
         raise ValueError("No hard/extra questions — run fixtures/prepare_spider.py first")
+
+    if same_db_split:
+        learn_pool, heldout_pool = _split_hard_by_db(hard_extra, rng)
+    else:
+        learn_pool, heldout_pool = _split_hard(hard_extra, learn_frac, rng)
+
+    if not heldout_pool:
+        raise ValueError(
+            f"Held-out pool is empty (learn_frac={learn_frac}, {len(hard_extra)} hard questions). "
+            "Lower learn_frac or add more hard questions."
+        )
 
     def _pick(pool: list[dict], n: int, phase: str) -> list[FeedItem]:
         return [
@@ -56,8 +120,8 @@ def build_stream(
 
     return (
         _pick(easy_med, n_baseline, "baseline")
-        + _pick(hard_extra, n_degraded, "degraded")
-        + _pick(hard_extra, n_recovery, "recovery")
+        + _pick(learn_pool, n_degraded, "degraded")    # few-shot source; failures extracted here
+        + _pick(heldout_pool, n_recovery, "recovery")  # benchmark eval; never a few-shot source
     )
 
 

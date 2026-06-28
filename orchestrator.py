@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from contracts.eventlog import DEFAULT_LOG, append_event
-from contracts.schemas import AgentConfig, DriftEvent
+from contracts.schemas import AgentConfig, DriftEvent, FewShotExample
 from correction.correction import handle as correction_handle
 from correction.learner import FailingCase
 from detector.config import DetectorConfig
@@ -44,6 +44,9 @@ def _build_feed(n: int, full: bool) -> list[FeedItem]:
     Seed is fixed so --dry-run-heldout and the full live run always operate on
     the identical LEARN / HELD-OUT split — the measurement and the demo are
     the same experiment.
+
+    same_db_split=True: every HELD-OUT question has at least one same-DB question in
+    LEARN, so injected examples are schema-relevant rather than cross-schema noise.
     """
     per_phase = 80 if full else n
     questions = load_questions()
@@ -53,7 +56,30 @@ def _build_feed(n: int, full: bool) -> list[FeedItem]:
         n_degraded=per_phase,
         n_recovery=per_phase,
         seed=_SEED,
+        same_db_split=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Accuracy helpers
+# ---------------------------------------------------------------------------
+
+def _unique_acc(
+    question_acc_pairs: list[tuple[str, float]],
+) -> tuple[float, int]:
+    """Mean accuracy over unique questions.
+
+    When the same question appears multiple times (stream samples with replacement),
+    take the first occurrence — at temperature=0.0 the model is deterministic so all
+    occurrences have the same accuracy. Returns (mean, n_unique).
+    """
+    by_q: dict[str, float] = {}
+    for q, acc in question_acc_pairs:
+        if q not in by_q:
+            by_q[q] = acc
+    if not by_q:
+        return 0.0, 0
+    return sum(by_q.values()) / len(by_q), len(by_q)
 
 
 # ---------------------------------------------------------------------------
@@ -63,14 +89,17 @@ def _build_feed(n: int, full: bool) -> list[FeedItem]:
 def dry_run_heldout(
     items: list[FeedItem],
     config: Optional[AgentConfig] = None,
-) -> float:
+) -> dict[str, float]:
     """Run held-out (recovery) items at base config, no corrections injected.
 
     Contamination-free by construction:
     - Fresh AgentConfig with empty few_shot_examples (no _active_config call).
     - run_item is called directly — it does not touch events.jsonl.
 
-    Returns overall accuracy so callers can assert the headroom gate.
+    Returns a dict with "overall" and per-difficulty unique-question accuracy.
+    Unique-question accuracy deduplicates repeated samples (stream uses rng.choices with
+    replacement, so the same question can appear multiple times; at temperature=0.0 the
+    model is deterministic, so the first occurrence is canonical).
     """
     if config is None:
         config = AgentConfig(
@@ -81,7 +110,8 @@ def dry_run_heldout(
 
     held_out = [it for it in items if it.phase == "recovery"]
     total = len(held_out)
-    accs_by_diff: dict[str, list[float]] = {}
+    # (question, accuracy) pairs per difficulty, for unique-question dedup
+    pairs_by_diff: dict[str, list[tuple[str, float]]] = {}
     n_scored = 0
     n_skipped = 0
 
@@ -99,23 +129,29 @@ def dry_run_heldout(
                   f"{item.question[:55]}", flush=True)
             continue
         n_scored += 1
-        accs_by_diff.setdefault(item.difficulty, []).append(rec.execution_accuracy)
+        pairs_by_diff.setdefault(item.difficulty, []).append(
+            (item.question, rec.execution_accuracy)
+        )
         mark = "✓" if rec.execution_accuracy == 1.0 else "✗"
         print(f"  [{i:>3}/{total}] [{item.difficulty:<6}] {mark}  "
               f"{item.question[:55]}", flush=True)
 
-    all_accs = [a for accs in accs_by_diff.values() for a in accs]
-    overall = sum(all_accs) / len(all_accs) if all_accs else 0.0
+    all_pairs = [p for ps in pairs_by_diff.values() for p in ps]
+    overall, n_unique = _unique_acc(all_pairs)
     result: dict[str, float] = {"overall": overall}
     for diff in ("easy", "medium", "hard", "extra"):
-        if diff in accs_by_diff:
-            accs = accs_by_diff[diff]
-            result[diff] = sum(accs) / len(accs)
+        if diff in pairs_by_diff:
+            acc, n_u = _unique_acc(pairs_by_diff[diff])
+            result[diff] = acc
 
-    print(f"\n  overall : {overall:.3f}  ({n_scored} scored, {n_skipped} skipped — gold SQL failed)")
+    print(
+        f"\n  overall : {overall:.3f}  "
+        f"({n_unique} unique q, {n_scored} runs, {n_skipped} skipped — gold SQL failed)"
+    )
     for diff in ("easy", "medium", "hard", "extra"):
-        if diff in result:
-            print(f"  {diff:<8}: {result[diff]:.3f}  ({len(accs_by_diff[diff])} runs)")
+        if diff in result and diff in pairs_by_diff:
+            acc_u, n_u = _unique_acc(pairs_by_diff[diff])
+            print(f"  {diff:<8}: {acc_u:.3f}  ({n_u} unique q, {len(pairs_by_diff[diff])} runs)")
 
     if overall >= 0.7:
         print(
@@ -259,15 +295,15 @@ def _print_comparison(
     base_accs: dict[str, float],
     diff: str = "hard",
 ) -> None:
-    """Print side-by-side hard-bucket accuracy with vs without examples."""
+    """Print side-by-side hard-bucket accuracy with vs without examples (unique-question)."""
     diff_recs = [r for r in recovery_records if r.difficulty.value == diff]
     if not diff_recs:
         print(f"\n[result] No {diff} recovery records to compare.")
         return
-    with_acc = sum(r.execution_accuracy for r in diff_recs) / len(diff_recs)
+    with_acc, n_unique = _unique_acc([(r.question, r.execution_accuracy) for r in diff_recs])
     without_acc = base_accs.get(diff, base_accs.get("overall", 0.0))
     print(f"\n{'='*60}")
-    print(f"  Self-improvement result ({diff} bucket, held-out pool):")
+    print(f"  Self-improvement result ({diff} bucket, {n_unique} unique held-out questions):")
     print(f"    WITHOUT examples (base)  : {without_acc:.3f}")
     print(f"    WITH examples (recovered): {with_acc:.3f}")
     delta = with_acc - without_acc
@@ -277,6 +313,102 @@ def _print_comparison(
         print(f"  ✓ Agent improved on {diff} queries after learning from its own failures.")
     else:
         print(f"  ✗ No improvement detected on {diff} queries.")
+    print("=" * 60, flush=True)
+
+
+def probe_relevance(items: list[FeedItem]) -> None:
+    """Cheap with/without probe: runs unique held-out questions twice (no events.jsonl writes).
+
+    Uses gold SQL from same-DB LEARN questions as examples (zero teacher API calls).
+    This isolates "does schema-relevant injection help?" from teacher quality.
+    Typically ~22 agent calls (2 × 11 unique held-out Qs) vs 240 for a full run.
+    """
+    base_config = _make_base_config("probe-base")
+
+    # Unique held-out questions (deduplicate by question_id since stream uses choices())
+    seen_ids: set[str] = set()
+    unique_heldout: list[FeedItem] = []
+    for it in items:
+        if it.phase == "recovery" and it.question_id not in seen_ids:
+            unique_heldout.append(it)
+            seen_ids.add(it.question_id)
+
+    # Build same-DB LEARN examples (gold SQL) per db_id — unique questions only
+    heldout_ids = {it.question_id for it in unique_heldout}
+    learn_by_db: dict[str, list[FeedItem]] = {}
+    seen_learn: dict[str, set[str]] = {}
+    for it in items:
+        if it.phase == "degraded" and it.question_id not in heldout_ids:
+            db = it.db_id
+            if db not in seen_learn:
+                seen_learn[db] = set()
+            if it.question_id not in seen_learn[db]:
+                learn_by_db.setdefault(db, []).append(it)
+                seen_learn[db].add(it.question_id)
+
+    total = len(unique_heldout)
+    print(
+        f"\n[probe] {total} unique held-out questions × 2 passes "
+        f"({total * 2} agent calls, no events.jsonl writes)",
+        flush=True,
+    )
+
+    without_accs: dict[str, float] = {}
+    with_accs: dict[str, float] = {}
+
+    for i, it in enumerate(unique_heldout, 1):
+        # WITHOUT — base config, no examples
+        rec_wo = run_item(it, base_config)
+        if rec_wo is not None:
+            without_accs[it.question_id] = rec_wo.execution_accuracy
+            mark_wo = "✓" if rec_wo.execution_accuracy == 1.0 else "✗"
+        else:
+            mark_wo = "SKIP"
+
+        # WITH — same-DB gold examples only (zero teacher calls)
+        same_db = learn_by_db.get(it.db_id, [])
+        examples = [
+            FewShotExample(
+                question=l.question, correct_sql=l.gold_sql, db_id=l.db_id, source="gold"
+            )
+            for l in same_db
+        ]
+        cfg_with = AgentConfig(
+            config_id="probe-with", model=_BASE_MODEL, few_shot_examples=examples
+        )
+        rec_w = run_item(it, cfg_with)
+        if rec_w is not None:
+            with_accs[it.question_id] = rec_w.execution_accuracy
+            mark_w = "✓" if rec_w.execution_accuracy == 1.0 else "✗"
+        else:
+            mark_w = "SKIP"
+
+        n_ex = len(examples)
+        print(
+            f"  [{i:>2}/{total}] [{it.db_id:<32}] [{it.difficulty:<6}] "
+            f"NO-EX:{mark_wo}  +{n_ex}ex:{mark_w}  {it.question[:40]}",
+            flush=True,
+        )
+
+    # Comparison
+    common = [q for q in without_accs if q in with_accs]
+    if not common:
+        print("[probe] No scorable questions.")
+        return
+    wo_mean = sum(without_accs[q] for q in common) / len(common)
+    w_mean = sum(with_accs[q] for q in common) / len(common)
+    delta = w_mean - wo_mean
+    print(f"\n{'='*60}")
+    print(f"  Probe: same-DB gold examples, {len(common)} unique held-out Qs")
+    print(f"    WITHOUT examples : {wo_mean:.3f}")
+    print(f"    WITH    examples : {w_mean:.3f}")
+    print(f"    Delta            : {delta:+.3f}")
+    if delta >= 0.05:
+        print("  ✓ Schema-relevant examples help — proceed to --full run.")
+    elif delta <= -0.02:
+        print("  ✗ Examples hurting accuracy — check db_id filter or example quality.")
+    else:
+        print("  ~ Marginal delta — base may be near ceiling; consider weaker model.")
     print("=" * 60, flush=True)
 
 
@@ -380,6 +512,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--probe", action="store_true",
+        help=(
+            "Cheap with/without test: run each unique held-out question twice — "
+            "once WITHOUT examples, once WITH same-DB gold examples. "
+            "Zero teacher API calls. ~22 agent calls instead of 240. "
+            "Use this to validate that schema-relevant examples help before --full."
+        ),
+    )
+    p.add_argument(
         "--fresh", action="store_true",
         help=(
             "Truncate events.jsonl before a real run so stale correction events "
@@ -399,6 +540,10 @@ if __name__ == "__main__":
 
     if args.dry_run_heldout:
         dry_run_heldout(items)
+        sys.exit(0)
+
+    if args.probe:
+        probe_relevance(items)
         sys.exit(0)
 
     if args.dry_run_degraded:
