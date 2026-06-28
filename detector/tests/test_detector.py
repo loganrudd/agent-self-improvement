@@ -335,3 +335,168 @@ class TestMockPinnedNumbers:
     def test_baseline_mean_range(self):
         ev = self.events[0]
         assert 0.94 <= ev.baseline_mean <= 0.96  # ~0.95
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Per-difficulty stratification
+# ---------------------------------------------------------------------------
+
+class TestStratification:
+    """Tests for Detector.stratified_means().
+
+    Tiers match test_detector.py convention:
+      Tier A — mock-replay invariants (survive threshold re-tuning)
+      Tier B — behavioral unit tests on hand-built streams
+      Tier C — mock-pinned numbers (seed=7; update if mock regenerated)
+    """
+
+    # ------------------------------------------------------------------
+    # Tier A — mock-replay invariants
+    # ------------------------------------------------------------------
+
+    def test_fire_time_hard_extra_below_easy_medium(self):
+        """At fire, hard/extra must be strictly below easy/medium — degraded signal visible."""
+        recs = _load_mock()
+        det = Detector(DetectorConfig())
+        fire_snap = None
+        for r in recs:
+            ev = det.update(r)
+            if ev is not None and fire_snap is None:
+                fire_snap = det.stratified_means()
+        assert fire_snap is not None
+        assert fire_snap[Difficulty.HARD] < fire_snap[Difficulty.EASY]
+        assert fire_snap[Difficulty.EXTRA] < fire_snap[Difficulty.MEDIUM]
+
+    def test_end_hard_extra_climbed_from_fire(self):
+        """Replaying to end: hard/extra must be strictly above their fire-time values."""
+        recs = _load_mock()
+        det = Detector(DetectorConfig())
+        fire_snap = None
+        for r in recs:
+            ev = det.update(r)
+            if ev is not None and fire_snap is None:
+                fire_snap = det.stratified_means()
+        end_snap = det.stratified_means()
+        assert end_snap[Difficulty.HARD] > fire_snap[Difficulty.HARD]
+        assert end_snap[Difficulty.EXTRA] > fire_snap[Difficulty.EXTRA]
+
+    def test_easy_medium_stable_baseline_to_end(self):
+        """easy/medium means at end must be within 0.05 of fire-time (no new easy/medium records)."""
+        recs = _load_mock()
+        det = Detector(DetectorConfig())
+        fire_snap = None
+        for r in recs:
+            ev = det.update(r)
+            if ev is not None and fire_snap is None:
+                fire_snap = det.stratified_means()
+        end_snap = det.stratified_means()
+        assert abs(end_snap[Difficulty.EASY] - fire_snap[Difficulty.EASY]) < 0.05
+        assert abs(end_snap[Difficulty.MEDIUM] - fire_snap[Difficulty.MEDIUM]) < 0.05
+
+    def test_baseline_only_hard_extra_omitted(self):
+        """Baseline-only replay: hard/extra never appear (no such records in P1)."""
+        recs = _load_mock()
+        det = Detector(DetectorConfig())
+        for r in recs[:80]:
+            det.update(r)
+        means = det.stratified_means()
+        assert Difficulty.HARD not in means
+        assert Difficulty.EXTRA not in means
+        assert Difficulty.EASY in means
+        assert Difficulty.MEDIUM in means
+
+    # ------------------------------------------------------------------
+    # Tier B — behavioral unit tests on hand-built streams
+    # ------------------------------------------------------------------
+
+    def test_per_bucket_mean_independent(self):
+        """Each bucket's mean is computed independently from other buckets."""
+        cfg = DetectorConfig(baseline_len=4, window=4, min_sustained=3, drop_threshold=0.2)
+        det = Detector(cfg)
+        # warmup with EASY=1.0
+        for i in range(4):
+            det.update(_make_rec(i, acc=1.0, difficulty=Difficulty.EASY))
+        # push known values: two HARD, two EXTRA
+        det.update(_make_rec(10, acc=0.0, difficulty=Difficulty.HARD))
+        det.update(_make_rec(11, acc=1.0, difficulty=Difficulty.HARD))
+        det.update(_make_rec(12, acc=0.25, difficulty=Difficulty.EXTRA))
+        det.update(_make_rec(13, acc=0.75, difficulty=Difficulty.EXTRA))
+        means = det.stratified_means()
+        assert means[Difficulty.HARD] == pytest.approx(0.5)
+        assert means[Difficulty.EXTRA] == pytest.approx(0.5)
+        assert means[Difficulty.EASY] == pytest.approx(1.0)
+        assert Difficulty.MEDIUM not in means
+
+    def test_empty_bucket_omitted_not_zero(self):
+        """Buckets with no records in the window are absent, not reported as 0.0."""
+        cfg = DetectorConfig(baseline_len=3, window=5, min_sustained=3, drop_threshold=0.2)
+        det = Detector(cfg)
+        for i in range(5):
+            det.update(_make_rec(i, acc=1.0, difficulty=Difficulty.EASY))
+        means = det.stratified_means()
+        assert Difficulty.HARD not in means
+        assert Difficulty.EXTRA not in means
+        assert Difficulty.MEDIUM not in means
+        assert Difficulty.EASY in means
+
+    def test_outage_excluded_from_strat_window(self):
+        """Outage records (-- error: prefix) must not enter per-difficulty windows."""
+        cfg = DetectorConfig(baseline_len=3, window=5, min_sustained=3, drop_threshold=0.2)
+        det = Detector(cfg)
+        # warmup with real EASY records
+        for i in range(3):
+            det.update(_make_rec(i, acc=1.0, difficulty=Difficulty.EASY))
+        # scatter outages — they carry difficulty=EASY but must not count
+        for i in range(5):
+            det.update(_outage_rec(100 + i))
+        # add two real EASY=1.0 to confirm window not poisoned
+        det.update(_make_rec(200, acc=1.0, difficulty=Difficulty.EASY))
+        det.update(_make_rec(201, acc=1.0, difficulty=Difficulty.EASY))
+        means = det.stratified_means()
+        assert means[Difficulty.EASY] == pytest.approx(1.0)
+
+    def test_per_bucket_maxlen_eviction(self):
+        """Each per-difficulty window honours maxlen; old values are evicted."""
+        cfg = DetectorConfig(baseline_len=2, window=3, min_sustained=5, drop_threshold=0.2)
+        det = Detector(cfg)
+        # warmup
+        for i in range(2):
+            det.update(_make_rec(i, acc=1.0, difficulty=Difficulty.EASY))
+        # push window+2 HARD records (5 total) — only last 3 should count
+        accs = [1.0, 1.0, 0.0, 0.0, 0.0]
+        for i, a in enumerate(accs):
+            det.update(_make_rec(10 + i, acc=a, difficulty=Difficulty.HARD))
+        means = det.stratified_means()
+        # last 3 HARD = [0, 0, 0] → mean 0.0
+        assert means[Difficulty.HARD] == pytest.approx(0.0)
+        assert det._strat_windows[Difficulty.HARD].n == 3  # maxlen respected
+
+    # ------------------------------------------------------------------
+    # Tier C — mock-pinned numbers (seed=7; update if mock regenerated)
+    # ------------------------------------------------------------------
+
+    def setup_method(self):
+        recs = _load_mock()
+        det = Detector(DetectorConfig())
+        self._fire_snap = None
+        for r in recs:
+            ev = det.update(r)
+            if ev is not None and self._fire_snap is None:
+                self._fire_snap = det.stratified_means()
+        self._end_snap = det.stratified_means()
+
+    def test_fire_hard_range(self):
+        assert 0.0 <= self._fire_snap[Difficulty.HARD] <= 0.2
+
+    def test_fire_extra_range(self):
+        assert 0.1 <= self._fire_snap[Difficulty.EXTRA] <= 0.4
+
+    def test_fire_easy_medium_high(self):
+        assert self._fire_snap[Difficulty.EASY] >= 0.9
+        assert self._fire_snap[Difficulty.MEDIUM] >= 0.9
+
+    def test_end_hard_climbed(self):
+        assert 0.8 <= self._end_snap[Difficulty.HARD] <= 1.0
+
+    def test_end_extra_climbed(self):
+        assert 0.6 <= self._end_snap[Difficulty.EXTRA] <= 0.85
