@@ -93,3 +93,9 @@ if __name__ == "__main__":
     for phase, accs in by_phase.items():
         avg = sum(accs) / len(accs)
         print(f"  {phase}: {avg:.2f} avg accuracy ({len(accs)} runs)")
+    api_errors = sum(1 for r in records if r.generated_sql.startswith("-- error:"))
+    gold_fails = evaluator.gold_failure_count
+    if api_errors:
+        print(f"  WARNING: {api_errors} API-error records (outage, not drift) — query_valid=False on these")
+    if gold_fails:
+        print(f"  WARNING: {gold_fails} gold-SQL failures scored as 1.0 — may inflate accuracy")
