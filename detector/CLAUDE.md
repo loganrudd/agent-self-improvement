@@ -34,3 +34,8 @@ integration. Keep the detection core clearly yours — it's the centerpiece.
 ---
 ## FLEXIBLE — Logan's notes (add freely below)
 <!-- window size, threshold choice, EWMA vs z-score, stratification approach... -->
+
+## Working agreement (detector sessions)
+- Build one phase at a time per `docs/detector-plan.md`; present each phase's plan first, wait for approval, then implement.
+- After each phase: show the exact run command against `fixtures/mock_telemetry.jsonl`, state what output to expect, and wait for verification before proceeding to the next phase.
+- Never edit `contracts/schemas.py`; import contracts, never redefine them locally.
