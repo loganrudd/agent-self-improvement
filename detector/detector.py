@@ -80,6 +80,58 @@ def load_telemetry(
         print(f"[detector] warning: skipped {bad} malformed line(s) in {p}", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# Summary printer (Step 2) — milestone lines only, no per-record trickle
+# ---------------------------------------------------------------------------
+
+def print_summary(
+    *,
+    n_records: int,
+    baseline: object | None,
+    event: DriftEvent | None,
+    fire_index: int | None,
+    strat: dict,
+) -> None:
+    """Print a human-readable summary of one detector run to stdout.
+
+    baseline: the Baseline object (may be None if warmup never completed).
+    event: the DriftEvent fired, or None.
+    strat: dict from Detector.stratified_means() snapshotted at fire time.
+    """
+    print(f"\n{'=' * 60}")
+    print(f"  Detector run — {n_records} records processed")
+    print(f"{'=' * 60}")
+
+    if baseline is None:
+        print("  [baseline] not established (too few records)")
+    else:
+        acc  = baseline.execution_accuracy
+        val  = baseline.query_valid
+        gap  = baseline.complexity_gap
+        print(f"  [baseline]  n={acc.n}  acc={acc.mean:.3f}  "
+              f"valid={val.mean:.3f}  gap={gap.mean:.3f}")
+
+    print()
+
+    if event is None:
+        print("  [result]  no drift detected")
+    else:
+        print(f"  [DRIFT DETECTED at record #{fire_index}]")
+        print(f"    channel      : {event.channel}")
+        print(f"    window_mean  : {event.window_mean:.3f}")
+        print(f"    baseline_mean: {event.baseline_mean:.3f}")
+        print(f"    severity     : {event.severity:.3f}")
+        print(f"    failure_mode : {event.failure_mode.value}")
+        print(f"    failing_runs : {len(event.failing_run_ids)} id(s) collected")
+        if strat:
+            print()
+            print("  [stratified accuracy at fire]")
+            for diff, mean in sorted(strat.items(), key=lambda x: x[0].value):
+                print(f"    {diff.value:<12} {mean:.3f}")
+
+    print(f"{'=' * 60}\n")
+
+
 class _State(Enum):
     WARMUP = auto()
     NORMAL = auto()
