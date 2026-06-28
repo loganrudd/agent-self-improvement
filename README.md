@@ -38,6 +38,15 @@ few-shot examples (3 teacher-verified, 5 gold-fallback, 2 anti-forgetting anchor
 agent recovered. The held-out questions are drawn from a pool disjoint from the examples'
 source, so this is out-of-sample generalization — not memorization.
 
+**Is it chance?** We re-evaluate the same 30 hard questions twice — each with and without the
+learned examples — and run a paired **McNemar exact test**: **p = 0.016** (two-sided), paired
+Δ **+0.233**, 95% CI **[+0.08, +0.39]**. Of the 7 questions whose outcome changed, **7 improved
+and 0 regressed** — the anti-forgetting anchors held: no question the agent already answered
+correctly broke after injection. (Absolute accuracy shifts ~2–3 questions run-to-run because the
+model is not perfectly deterministic even at `temperature=0`; the demo run above measured +0.267,
+the paired test +0.233 — the *effect* is stable, so the headline claim is the paired delta with
+its interval, not a single point estimate.) Reproduce with `python orchestrator.py --significance`.
+
 ---
 
 ## The idea: a feedback spine
