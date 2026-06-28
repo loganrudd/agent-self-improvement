@@ -1,0 +1,26 @@
+[
+  {
+    "id": "rule:concert_singer:seed001",
+    "scope": "db",
+    "db_id": "concert_singer",
+    "trap": "Using non-existent column dept_name instead of country",
+    "fix": "Use singer.country (not dept_name) to group or filter singers by country",
+    "trigger": "country",
+    "applies_to": ["schema:concert_singer:singer"],
+    "source": "seed",
+    "hits": 0,
+    "seen_dbs": ["concert_singer"]
+  },
+  {
+    "id": "rule:global:seed_global001",
+    "scope": "global",
+    "db_id": null,
+    "trap": "Pluralizing table names when the schema uses singular form",
+    "fix": "Spider table names are singular: use singer (not singers), concert (not concerts)",
+    "trigger": "singers",
+    "applies_to": [],
+    "source": "seed",
+    "hits": 0,
+    "seen_dbs": ["concert_singer", "world_1"]
+  }
+]

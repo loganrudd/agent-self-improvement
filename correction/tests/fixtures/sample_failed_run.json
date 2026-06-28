@@ -1,0 +1,15 @@
+{
+  "run_id": "run_0099",
+  "db_id": "concert_singer",
+  "question": "How many singers are from each country?",
+  "broken_sql": "SELECT dept_name, COUNT(*) FROM singer GROUP BY dept_name",
+  "execution_error": "no such column: dept_name",
+  "expected_result": [["France", 3], ["USA", 2], ["UK", 1]],
+  "observed_result": [],
+  "schema": {
+    "singer": ["singer_id", "name", "birth_year", "country"],
+    "concert": ["concert_id", "concert_name", "theme", "stadium_id", "year"],
+    "stadium": ["stadium_id", "location", "name", "capacity", "highest", "lowest", "average"],
+    "singer_in_concert": ["concert_id", "singer_id"]
+  }
+}

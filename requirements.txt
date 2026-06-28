@@ -7,4 +7,5 @@ uvicorn>=0.29
 # [Logan]
 # [Rohan]
 # [Mihir]
+networkx>=3.0
 # [Yiwen]
