@@ -24,7 +24,7 @@ model swap:
 | Hard-bucket execution accuracy (same 30 held-out questions, same eval) | Accuracy |
 |---|---|
 | Base agent — no examples | 0.300 |
-| Teacher model (MiniMax-M3) — the stronger model used to generate examples | 0.421 |
+| Teacher model (MiniMax-M3) — the stronger model used to generate examples | 0.400 |
 | **Base agent after self-correction — learned few-shot examples** | **0.567** |
 | **Improvement over base** | **+0.267** |
 

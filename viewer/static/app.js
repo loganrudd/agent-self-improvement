@@ -168,7 +168,7 @@ function buildLegend() {
     .join("");
 }
 
-const TEACHER_CEILING = 0.421; // teacher (MiniMax-M3) hard-bucket on same held-out questions — python orchestrator.py --ceiling
+const TEACHER_CEILING = 0.400; // teacher (MiniMax-M3) hard-bucket on same 30 held-out questions — python orchestrator.py --ceiling
 
 /* --- caption: a one-line, data-driven framing of the V -------------------- */
 function buildCaption(state) {
@@ -176,16 +176,38 @@ function buildCaption(state) {
   const hard = runs.map((r) => r.acc_hard).filter((x) => x != null);
   if (!hard.length) return "";
   const valley = Math.min(...hard);
-  const final = hard[hard.length - 1];
   const n = state.correction ? state.correction.examples.length : 0;
-  const gapClosed = final - valley;
-  const gapToSota = TEACHER_CEILING - valley;
-  const pctClosed = gapToSota > 0 ? Math.round((gapClosed / gapToSota) * 100) : 0;
+
+  // Recovered accuracy = UNIQUE-question hard accuracy over the recovery region (after
+  // correction fired), matching the headline metric. NOT the trailing-window endpoint —
+  // that swings with whichever questions land in the last 20 samples (it ends on a trough
+  // here even though the curve recovers and peaks well above it mid-region).
+  const corrAt = state.correction ? state.correction.at : 0;
+  const byQ = {};
+  for (const r of runs.slice(corrAt)) {
+    if (r.difficulty === "hard" && !(r.question in byQ)) byQ[r.question] = r.accuracy_raw;
+  }
+  const vals = Object.values(byQ);
+  const recovered = vals.length
+    ? vals.reduce((a, b) => a + b, 0) / vals.length
+    : hard[hard.length - 1];
+
+  let teacherClause;
+  if (recovered >= TEACHER_CEILING) {
+    teacherClause =
+      `That pushed it past the teacher model itself (${pct(TEACHER_CEILING)} on the same ` +
+      `questions) — the weak agent ended up more accurate than the model that taught it.`;
+  } else {
+    const pctClosed = Math.round(((recovered - valley) / (TEACHER_CEILING - valley)) * 100);
+    teacherClause =
+      `That autonomously closed ${pctClosed}% of the gap to the teacher model ` +
+      `(${pct(TEACHER_CEILING)}, same questions).`;
+  }
   return (
     `Hard-query accuracy collapsed to ${pct(valley)} under the harder distribution, ` +
-    `then recovered to ${pct(final)} — same difficulty — after the agent learned ` +
-    `${n} example${n === 1 ? "" : "s"} from its own failures. ` +
-    `That autonomously closed ${pctClosed}% of the gap to the teacher model (${pct(TEACHER_CEILING)}, same questions).`
+    `then recovered to ${pct(recovered)} on unique held-out questions — same difficulty — ` +
+    `after the agent learned ${n} example${n === 1 ? "" : "s"} from its own failures. ` +
+    teacherClause
   );
 }
 
