@@ -79,14 +79,14 @@ detector/
 
 ---
 
-## Phase 5 — Event-log wiring + standalone CLI
-**What:** `python -m detector.detector --input fixtures/mock_telemetry.jsonl`. Reads telemetry, runs detector, prints a readable summary (baseline → progress → fire moment + stratified breakdown), appends `DriftEvent` to `events.jsonl` via `contracts.eventlog.append_event`. Flags: `--window --baseline --drop-threshold --cap --output`.
+## Phase 5 — Event-log wiring + standalone CLI ✓ DONE
+**What:** `python -m detector.detector --input fixtures/mock_telemetry.jsonl`. Reads telemetry, runs detector, prints a readable summary (baseline → progress → fire moment + stratified breakdown), appends `DriftEvent` to `events.jsonl` via `contracts.eventlog.append_event`. Flags: `--window --baseline --drop-threshold --cap --output --format`.
 
-**Gotcha:** mock is **raw `TelemetryRecord` JSONL**, but `eventlog.read_events` expects the typed envelope. Add a small raw-`TelemetryRecord` loader for standalone runs; consume via `read_events(only="telemetry")` for the live orchestrator path (autodetect or `--format`).
+**Gotcha:** mock is **raw `TelemetryRecord` JSONL**, but `eventlog.read_events` expects the typed envelope. Solved via `load_telemetry(path, fmt="auto")` — sniffs the first non-blank line for a `"type"` key (envelope) vs. raw; `--format {auto,raw,events}` is the explicit override. Both paths yield identical 240-record streams and the same single event.
 
-**Edge cases + tests:** missing/empty input, fewer records than baseline length (clear error), malformed lines (skip + warn), no-drift input (exit cleanly, "no drift").
+**Edge cases + tests:** missing/empty input (exit 2 + stderr), fewer records than baseline_len (exit 2 + "need ≥ N" message), malformed lines (skip + warn to stderr), no-drift input (exit 0 + "no drift" line, nothing appended). Re-running stacks events (documented in `--help`).
 
-**Verify:** Run command, watch it fire mid-stream + print breakdown; `read_events(only="drift")` returns exactly one event with the right fields. Ships the end-to-end integration test.
+**Verify:** `python3 -m pytest detector/tests/ -q` → **108 passed** (83 Phases 1–4 + 25 new CLI/loader/e2e tests). `read_events(only="drift")` returns exactly one event with `channel=="execution_accuracy"`, `failure_mode==VALID_BUT_WRONG`, `failing_run_ids` non-empty and ≤ cap=8.
 
 ---
 
