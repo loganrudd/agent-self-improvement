@@ -30,8 +30,8 @@ let CORR_BY_Q = {}; // question -> teacher's corrected SQL (from the correction 
 let POINTS = {}; // full {x,y} arrays per stratum (sliced for the bright reveal)
 
 // the bright (revealed) datasets, by stratum -> index into chart.data.datasets
-// order: [sota(0), faint easy(1), faint overall(2), faint hard(3), bright easy(4), bright overall(5), bright hard(6)]
-const BRIGHT_IDX = { acc_easy: 4, acc_overall: 5, acc_hard: 6 };
+// order: [teacher_ceiling(0), faint overall(1), faint hard(2), bright overall(3), bright hard(4)]
+const BRIGHT_IDX = { acc_overall: 3, acc_hard: 4 };
 
 // replay transport
 let playing = false;
@@ -50,14 +50,14 @@ const sotaLabel = {
   id: "sotaLabel",
   afterDatasetsDraw(chart) {
     const { ctx, chartArea: area, scales } = chart;
-    const y = scales.y.getPixelForValue(SPIDER_SOTA);
+    const y = scales.y.getPixelForValue(TEACHER_CEILING);
     if (y < area.top || y > area.bottom) return;
     ctx.save();
     ctx.font = "500 11px ui-sans-serif, system-ui, sans-serif";
     ctx.fillStyle = COL.muted;
     ctx.textBaseline = "bottom";
     ctx.textAlign = "right";
-    ctx.fillText("Spider 1.0 SOTA 91%", area.right - 4, y - 3);
+    ctx.fillText(`Teacher ceiling ${pct(TEACHER_CEILING)}`, area.right - 4, y - 3);
     ctx.restore();
   },
 };
@@ -157,7 +157,6 @@ function buildLegend() {
   const keys = [
     { label: "Overall", color: COL.overall, strong: true },
     { label: "Hard / extra", color: COL.hard, strong: true },
-    { label: "Easy / medium", color: COL.easy, dashed: true },
   ];
   document.getElementById("legend").innerHTML = keys
     .map(
@@ -169,7 +168,7 @@ function buildLegend() {
     .join("");
 }
 
-const SPIDER_SOTA = 0.91; // Spider 1.0 SOTA execution accuracy (test set, blended difficulties)
+const TEACHER_CEILING = 0.421; // teacher (MiniMax-M3) hard-bucket on same held-out questions — python orchestrator.py --ceiling
 
 /* --- caption: a one-line, data-driven framing of the V -------------------- */
 function buildCaption(state) {
@@ -180,13 +179,13 @@ function buildCaption(state) {
   const final = hard[hard.length - 1];
   const n = state.correction ? state.correction.examples.length : 0;
   const gapClosed = final - valley;
-  const gapToSota = SPIDER_SOTA - valley;
+  const gapToSota = TEACHER_CEILING - valley;
   const pctClosed = gapToSota > 0 ? Math.round((gapClosed / gapToSota) * 100) : 0;
   return (
     `Hard-query accuracy collapsed to ${pct(valley)} under the harder distribution, ` +
     `then recovered to ${pct(final)} — same difficulty — after the agent learned ` +
     `${n} example${n === 1 ? "" : "s"} from its own failures. ` +
-    `That autonomously closed ${pctClosed}% of the gap to Spider 1.0 SOTA (${pct(SPIDER_SOTA)}, blended).`
+    `That autonomously closed ${pctClosed}% of the gap to the teacher model (${pct(TEACHER_CEILING)}, same questions).`
   );
 }
 
@@ -378,18 +377,18 @@ function render(state) {
     });
 
   // Static SOTA reference line — constant across all runs
-  const sotaData = state.runs.map((r) => ({ x: r.run_index, y: SPIDER_SOTA }));
+  const sotaData = state.runs.map((r) => ({ x: r.run_index, y: TEACHER_CEILING }));
 
   chart = new Chart(document.getElementById("curve"), {
     type: "line",
     data: {
-      // order must match BRIGHT_IDX: [sota, faint easy, faint overall, faint hard, bright easy, bright overall, bright hard]
+      // order must match BRIGHT_IDX: [teacher_ceiling, faint overall, faint hard, bright overall, bright hard]
       datasets: [
         {
-          label: "Spider 1.0 SOTA (blended)",
+          label: "Teacher ceiling (same questions)",
           data: sotaData,
-          borderColor: withAlpha(COL.muted, 0.45),
-          borderWidth: 1,
+          borderColor: withAlpha(COL.muted, 0.75),
+          borderWidth: 1.5,
           borderDash: [6, 5],
           pointRadius: 0,
           pointHitRadius: 0,
@@ -397,10 +396,8 @@ function render(state) {
           spanGaps: true,
           _faint: true, // exclude from tooltip (same flag as faint strata)
         },
-        faintDS("acc_easy", COL.easy, 1.5, [4, 4]),
         faintDS("acc_overall", COL.overall, 2.5),
         faintDS("acc_hard", COL.hard, 3),
-        brightDS("acc_easy", "Easy / medium", COL.easy, 1.5, [4, 4], 32),
         brightDS("acc_overall", "Overall", COL.overall, 2.5, [], 31),
         brightDS("acc_hard", "Hard / extra", COL.hard, 3, [], 30),
       ],

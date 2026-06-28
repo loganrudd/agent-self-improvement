@@ -38,6 +38,210 @@ _N_ANCHORS = 2
 # Feed construction
 # ---------------------------------------------------------------------------
 
+def ceiling_run(items: list[FeedItem]) -> dict[str, float]:
+    """Run the teacher model on unique held-out questions to measure the accuracy ceiling.
+
+    Same questions, same eval harness, same difficulty slice as the base/recovery runs —
+    the only variable is the model (teacher tier vs. base tier). This gives a same-slice,
+    same-harness ceiling: an apples-to-apples upper bound rather than a blended leaderboard
+    number.
+
+    No events.jsonl writes (contamination-free; does not affect _active_config).
+    """
+    from correction.teacher import generate_sql as teacher_generate
+    from harness.evaluator import execution_accuracy as eval_acc
+    from harness.spider import get_db_path, schema_text
+
+    held_out = [it for it in items if it.phase == "recovery"]
+    seen_ids: set[str] = set()
+    unique: list[FeedItem] = []
+    for it in held_out:
+        if it.question_id not in seen_ids:
+            unique.append(it)
+            seen_ids.add(it.question_id)
+
+    total = len(unique)
+    pairs_by_diff: dict[str, list[tuple[str, float]]] = {}
+    n_skipped = 0
+
+    print(
+        f"[ceiling] {total} unique held-out questions, teacher model (no events.jsonl writes).",
+        flush=True,
+    )
+
+    for i, item in enumerate(unique, 1):
+        db_path = get_db_path(item.db_id)
+        schema = schema_text(db_path)
+        try:
+            sql = teacher_generate(item.question, schema)
+        except Exception as e:
+            n_skipped += 1
+            print(f"  [{i:>3}/{total}] [{item.difficulty:<6}] ERROR {e}", flush=True)
+            continue
+        acc = eval_acc(sql, item.gold_sql, db_path)
+        if acc is None:
+            n_skipped += 1
+            print(f"  [{i:>3}/{total}] [{item.difficulty:<6}] SKIP (gold failed)", flush=True)
+            continue
+        mark = "✓" if acc == 1.0 else "✗"
+        print(f"  [{i:>3}/{total}] [{item.difficulty:<6}] {mark}  {item.question[:55]}", flush=True)
+        pairs_by_diff.setdefault(item.difficulty, []).append((item.question, acc))
+
+    all_pairs = [p for ps in pairs_by_diff.values() for p in ps]
+    overall, n_unique = _unique_acc(all_pairs)
+    result: dict[str, float] = {"overall": overall}
+    for diff in ("easy", "medium", "hard", "extra"):
+        if diff in pairs_by_diff:
+            acc_val, _ = _unique_acc(pairs_by_diff[diff])
+            result[diff] = acc_val
+
+    print(f"\n  teacher ceiling overall: {overall:.3f}  ({n_unique} unique q, {n_skipped} skipped)")
+    for diff in ("easy", "medium", "hard", "extra"):
+        if diff in result and diff in pairs_by_diff:
+            acc_val, n_u = _unique_acc(pairs_by_diff[diff])
+            print(f"  {diff:<8}: {acc_val:.3f}  ({n_u} unique q)")
+
+    return result
+
+
+def _mcnemar_report(label: str, pairs: list[tuple[float, float]]) -> None:
+    """Print a paired 2×2 table + McNemar exact two-sided p + 95% CI for one bucket.
+
+    pairs: list of (without_acc, with_acc), each binary (1.0 correct / 0.0 wrong).
+    """
+    from math import comb
+
+    n = len(pairs)
+    if n == 0:
+        print(f"\n  [{label}] no questions in this bucket.")
+        return
+
+    a = sum(1 for wo, w in pairs if wo == 1.0 and w == 1.0)  # right→right
+    b = sum(1 for wo, w in pairs if wo == 0.0 and w == 1.0)  # wrong→right (improved)
+    c = sum(1 for wo, w in pairs if wo == 1.0 and w == 0.0)  # right→wrong (regressed)
+    d = sum(1 for wo, w in pairs if wo == 0.0 and w == 0.0)  # wrong→wrong
+
+    disc = b + c
+    if disc == 0:
+        p_val = 1.0
+    else:
+        tail = min(b, c)
+        p_val = min(1.0, 2.0 * sum(comb(disc, k) * (0.5 ** disc) for k in range(tail + 1)))
+
+    deltas = [w - wo for wo, w in pairs]
+    mean_delta = sum(deltas) / n
+    var = sum((di - mean_delta) ** 2 for di in deltas) / (n - 1) if n > 1 else 0.0
+    se = (var / n) ** 0.5
+    ci_lo, ci_hi = mean_delta - 1.96 * se, mean_delta + 1.96 * se
+
+    wo_acc = sum(wo for wo, _ in pairs) / n
+    w_acc = sum(w for _, w in pairs) / n
+
+    print(f"\n{'=' * 60}")
+    print(f"  McNemar paired test — {label}  (n={n})")
+    print(f"{'=' * 60}")
+    print(f"  WITHOUT examples : {int(round(wo_acc * n))}/{n} correct  ({wo_acc:.3f})")
+    print(f"  WITH    examples : {int(round(w_acc * n))}/{n} correct  ({w_acc:.3f})")
+    print(f"  Paired 2×2: right→right={a}  wrong→right={b}(improved)  "
+          f"right→wrong={c}(regressed)  wrong→wrong={d}")
+    print(f"  Discordant b+c={disc}  |  McNemar exact p = {p_val:.4f}  (two-sided)")
+    print(f"  Paired Δ = {mean_delta:+.3f}  95% CI [{ci_lo:+.3f}, {ci_hi:+.3f}]")
+    if p_val < 0.05:
+        print(f"  ✓ p<0.05 — not attributable to chance at this sample size.")
+    elif p_val < 0.10:
+        print(f"  ~ p<0.10 — trend, not conclusive at n={n}.")
+    else:
+        print(f"  ✗ p≥0.10 — cannot rule out chance at this sample size.")
+    print("=" * 60, flush=True)
+
+
+def significance_run(items: list[FeedItem]) -> None:
+    """McNemar paired significance test: same held-out questions WITHOUT vs WITH examples.
+
+    Reads the CorrectionAction from events.jsonl (run --full first).
+    Runs each unique held-out question exactly twice — base config, then with-examples
+    config — so each question is its own control. No events.jsonl writes.
+
+    McNemar exact (two-sided) on the discordant pairs tests H₀: examples have no net
+    effect. Normal-approximation 95% CI on the paired per-question deltas gives the
+    effect size with uncertainty.
+    """
+    from contracts.eventlog import read_events
+    from contracts.schemas import CorrectionAction
+
+    corrections = read_events(only="correction")
+    if not corrections:
+        print(
+            "[significance] No correction event in events.jsonl — run --full first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    latest: CorrectionAction = corrections[-1]
+    print(
+        f"[significance] Loaded CorrectionAction: {len(latest.new_few_shot_examples)} examples.",
+        flush=True,
+    )
+
+    base_config = _make_base_config("sig-base")
+    with_config = base_config.model_copy(update={
+        "config_id": "sig-with",
+        "few_shot_examples": latest.new_few_shot_examples,
+    })
+
+    held_out = [it for it in items if it.phase == "recovery"]
+    seen_ids: set[str] = set()
+    unique: list[FeedItem] = []
+    for it in held_out:
+        if it.question_id not in seen_ids:
+            unique.append(it)
+            seen_ids.add(it.question_id)
+
+    total = len(unique)
+    print(
+        f"[significance] {total} unique held-out questions × 2 passes = {total * 2} agent calls.",
+        flush=True,
+    )
+
+    results: list[tuple[str, str, float, float]] = []  # (question_id, difficulty, wo, w)
+    n_skipped = 0
+
+    for i, item in enumerate(unique, 1):
+        rec_wo = run_item(item, base_config)
+        rec_w = run_item(item, with_config)
+
+        if rec_wo is None or rec_w is None:
+            n_skipped += 1
+            print(f"  [{i:>2}/{total}] SKIP (gold failed)", flush=True)
+            continue
+
+        wo = rec_wo.execution_accuracy
+        w = rec_w.execution_accuracy
+        results.append((item.question_id, item.difficulty, wo, w))
+
+        if wo == 0.0 and w == 1.0:
+            verdict = "✗→✓ IMPROVED"
+        elif wo == 1.0 and w == 0.0:
+            verdict = "✓→✗ REGRESSED"
+        elif wo == 1.0 and w == 1.0:
+            verdict = "✓→✓"
+        else:
+            verdict = "✗→✗"
+        print(
+            f"  [{i:>2}/{total}] [{item.difficulty:<6}] {verdict}  {item.question[:50]}",
+            flush=True,
+        )
+
+    if not results:
+        print("[significance] No scorable questions.", file=sys.stderr)
+        return
+
+    # The headline claim is HARD-bucket, so test that bucket first; overall second.
+    hard_pairs = [(wo, w) for _, diff, wo, w in results if diff == "hard"]
+    all_pairs = [(wo, w) for _, _, wo, w in results]
+    _mcnemar_report("HARD bucket (the headline claim)", hard_pairs)
+    _mcnemar_report("Overall (hard + extra)", all_pairs)
+
+
 def _build_feed(n: int, full: bool) -> list[FeedItem]:
     """Load Spider questions and build the change-point stream.
 
@@ -526,6 +730,23 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--significance", action="store_true",
+        help=(
+            "McNemar paired significance test: run each unique held-out question twice "
+            "(WITHOUT then WITH learned examples from events.jsonl). Requires --full to "
+            "have been run first. No events.jsonl writes."
+        ),
+    )
+    p.add_argument(
+        "--ceiling", action="store_true",
+        help=(
+            "Run the teacher model on the unique held-out pool. "
+            "Produces an apples-to-apples ceiling: same questions, same eval, stronger model. "
+            "No events.jsonl writes. Use the hard-bucket result to replace the SOTA line in "
+            "viewer/static/app.js (TEACHER_CEILING constant)."
+        ),
+    )
+    p.add_argument(
         "--fresh", action="store_true",
         help=(
             "Truncate events.jsonl before a real run so stale correction events "
@@ -542,6 +763,22 @@ if __name__ == "__main__":
     require_api_key()
 
     items = _build_feed(args.n, args.full)
+
+    # The validation modes exist to test the --full headline, and the correction
+    # examples in events.jsonl were generated under --full. Force the 80/phase feed
+    # so the held-out sample (and RNG trajectory) matches, regardless of --n.
+    if (args.significance or args.ceiling) and not args.full:
+        print("[orchestrator] forcing --full feed for validation mode "
+              "(matches the headline's held-out sample).", flush=True)
+        items = _build_feed(args.n, full=True)
+
+    if args.significance:
+        significance_run(items)
+        sys.exit(0)
+
+    if args.ceiling:
+        ceiling_run(items)
+        sys.exit(0)
 
     if args.dry_run_heldout:
         dry_run_heldout(items)
