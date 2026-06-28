@@ -77,22 +77,29 @@ def dry_run_heldout(
         )
 
     held_out = [it for it in items if it.phase == "recovery"]
+    total = len(held_out)
     accs_by_diff: dict[str, list[float]] = {}
     n_scored = 0
     n_skipped = 0
 
     print(
-        f"[dry-run-heldout] {len(held_out)} held-out items, "
-        f"base config (no corrections)..."
+        f"[dry-run-heldout] {total} held-out items, base config (no corrections). "
+        f"All hard/extra on a reasoning model — expect a few seconds each.",
+        flush=True,
     )
 
-    for item in held_out:
+    for i, item in enumerate(held_out, 1):
         rec = run_item(item, config)
         if rec is None:
             n_skipped += 1
+            print(f"  [{i:>3}/{total}] [{item.difficulty:<6}] SKIP (gold SQL failed)  "
+                  f"{item.question[:55]}", flush=True)
             continue
         n_scored += 1
         accs_by_diff.setdefault(item.difficulty, []).append(rec.execution_accuracy)
+        mark = "✓" if rec.execution_accuracy == 1.0 else "✗"
+        print(f"  [{i:>3}/{total}] [{item.difficulty:<6}] {mark}  "
+              f"{item.question[:55]}", flush=True)
 
     all_accs = [a for accs in accs_by_diff.values() for a in accs]
     overall = sum(all_accs) / len(all_accs) if all_accs else 0.0
