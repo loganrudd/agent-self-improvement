@@ -21,17 +21,31 @@ The agent learned from its own failures and **nearly doubled its accuracy on har
 had never seen as examples** — same questions, same difficulty, no human in the loop and no
 model swap:
 
-| Hard-bucket execution accuracy (30 unique held-out questions) | Accuracy |
+| Hard-bucket execution accuracy (same 30 held-out questions, same eval) | Accuracy |
 |---|---|
 | Base agent — no examples | 0.300 |
-| **After self-correction — learned few-shot examples** | **0.567** |
-| **Improvement** | **+0.267** |
+| Teacher model (MiniMax-M3) — the stronger model used to generate examples | 0.400 |
+| **Base agent after self-correction — learned few-shot examples** | **0.567** |
+| **Improvement over base** | **+0.267** |
+
+The self-improved base agent **exceeded its own teacher** on the same questions — because
+5 of the 10 injected examples are execution-verified gold SQL that the teacher itself couldn't
+produce, scaffolding the weaker model beyond the stronger one's unaided performance.
 
 In one unattended run the detector fired automatically at the change-point
 (`severity=0.295`, windowed accuracy `0.48` vs `0.775` baseline), correction synthesized 10
 few-shot examples (3 teacher-verified, 5 gold-fallback, 2 anti-forgetting anchors), and the
 agent recovered. The held-out questions are drawn from a pool disjoint from the examples'
 source, so this is out-of-sample generalization — not memorization.
+
+**Is it chance?** We re-evaluate the same 30 hard questions twice — each with and without the
+learned examples — and run a paired **McNemar exact test**: **p = 0.016** (two-sided), paired
+Δ **+0.233**, 95% CI **[+0.08, +0.39]**. Of the 7 questions whose outcome changed, **7 improved
+and 0 regressed** — the anti-forgetting anchors held: no question the agent already answered
+correctly broke after injection. (Absolute accuracy shifts ~2–3 questions run-to-run because the
+model is not perfectly deterministic even at `temperature=0`; the demo run above measured +0.267,
+the paired test +0.233 — the *effect* is stable, so the headline claim is the paired delta with
+its interval, not a single point estimate.) Reproduce with `python orchestrator.py --significance`.
 
 ---
 
