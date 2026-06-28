@@ -101,6 +101,33 @@ class Detector:
         # DRIFTING: latched — never fires again
         return None
 
+    def _diagnose_failures(self) -> tuple[FailureMode, list[str]]:
+        """Majority failure mode + prioritized, capped run ids from the current window.
+
+        Returns (NONE, []) when the window holds no strict failures — defensive,
+        possible with partial-accuracy streams; shouldn't happen on the binary mock.
+        Dominant-mode ids come first, then other-mode ids, capped at failing_ids_cap.
+        Tie-break: VALID_BUT_WRONG wins (the learnable logic case; explicit over Counter
+        insertion-order).
+        """
+        failures = [
+            (r.run_id, _classify_failure(r))
+            for r in self._record_window
+            if r.execution_accuracy == 0.0
+        ]
+        if not failures:
+            return FailureMode.NONE, []
+
+        counts: Counter[FailureMode] = Counter(mode for _, mode in failures)
+        dominant = max(
+            counts,
+            key=lambda m: (counts[m], m == FailureMode.VALID_BUT_WRONG),
+        )
+        dom_ids = [rid for rid, mode in failures if mode == dominant]
+        other_ids = [rid for rid, mode in failures if mode != dominant]
+        failing_ids = (dom_ids + other_ids)[: self._cfg.failing_ids_cap]
+        return dominant, failing_ids
+
     def stratified_means(self) -> dict[Difficulty, float]:
         """Current windowed execution-accuracy per difficulty.
 
@@ -139,14 +166,15 @@ class Detector:
 
         if self._breach_streak >= self._cfg.min_sustained:
             self._state = _State.DRIFTING
+            failure_mode, failing_run_ids = self._diagnose_failures()
             return DriftEvent(
                 detected_at=record.timestamp,
                 channel="execution_accuracy",
                 severity=max(0.0, baseline_mean - window_mean),
                 window_mean=window_mean,
                 baseline_mean=baseline_mean,
-                failure_mode=FailureMode.NONE,
-                failing_run_ids=[],
+                failure_mode=failure_mode,
+                failing_run_ids=failing_run_ids,
             )
 
         return None
