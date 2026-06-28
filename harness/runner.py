@@ -72,6 +72,8 @@ if __name__ == "__main__":
     parser.add_argument("--n", type=int, default=5, help="Questions per phase (default 5)")
     args = parser.parse_args()
 
+    agent.require_api_key()  # fail fast before writing any telemetry
+
     n = 80 if args.full else args.n
     questions = load_questions()
     items = build_stream(questions, n_baseline=n, n_degraded=n, n_recovery=n)

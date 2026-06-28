@@ -3,7 +3,11 @@ Pull a Spider subset for the demo. Run once from repo root:
 
     python fixtures/prepare_spider.py
 
-Prereq: git clone https://github.com/taoyds/spider.git /tmp/spider_data
+Prereq: the FULL Spider dataset (questions + SQLite DBs), not just the GitHub code repo.
+  - Official zip: https://yale-lily.github.io/spider  → unzip to /tmp/spider_data
+  - Or set SPIDER_DATA to wherever you extracted it.
+
+The taoyds/spider git clone alone is NOT enough — it has no database/ folder.
 
 Outputs:
     fixtures/spider_subset.json         — 100 questions (50 easy/med + 50 hard/extra)
@@ -54,20 +58,89 @@ def count_complexity(sql: str) -> int:
     return joins + nested + having + group_by
 
 
-def main() -> None:
-    train_path = os.path.join(SPIDER_DATA, "train_spider.json")
-    if not os.path.exists(train_path):
-        print(f"Spider data not found at {train_path}")
-        print("Run: git clone https://github.com/taoyds/spider.git /tmp/spider_data")
-        sys.exit(1)
+def _train_candidates(root: str) -> list[str]:
+    return [
+        os.path.join(root, "train_spider.json"),
+        os.path.join(root, "evaluation_examples", "examples", "train_spider.json"),
+    ]
 
-    db_base = os.path.join(SPIDER_DATA, "database")
-    available_dbs = set()
-    if os.path.exists(db_base):
-        for db_id in os.listdir(db_base):
-            sqlite_path = os.path.join(db_base, db_id, f"{db_id}.sqlite")
-            if os.path.exists(sqlite_path):
-                available_dbs.add(db_id)
+
+def _db_base_candidates(root: str) -> list[str]:
+    return [
+        os.path.join(root, "database"),
+        os.path.join(root, "spider_data", "database"),
+    ]
+
+
+def resolve_train_path(root: str) -> str | None:
+    for path in _train_candidates(root):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def resolve_db_base(root: str) -> str | None:
+    for path in _db_base_candidates(root):
+        if not os.path.isdir(path):
+            continue
+        for db_id in os.listdir(path):
+            if os.path.exists(os.path.join(path, db_id, f"{db_id}.sqlite")):
+                return path
+    return None
+
+
+def list_available_dbs(db_base: str) -> set[str]:
+    available: set[str] = set()
+    for db_id in os.listdir(db_base):
+        if os.path.exists(os.path.join(db_base, db_id, f"{db_id}.sqlite")):
+            available.add(db_id)
+    return available
+
+
+def _die_missing_data(root: str) -> None:
+    print(f"Spider dataset not ready under SPIDER_DATA={root!r}\n")
+    train_path = resolve_train_path(root)
+    db_base = resolve_db_base(root)
+
+    if train_path:
+        print(f"  Found questions: {train_path}")
+    else:
+        print("  Missing: train_spider.json")
+        print("    Checked:")
+        for path in _train_candidates(root):
+            print(f"      - {path}")
+
+    if db_base:
+        print(f"  Found databases: {db_base} ({len(list_available_dbs(db_base))} schemas)")
+    else:
+        print("  Missing: database/<db_id>/<db_id>.sqlite files")
+        print("    The GitHub code repo does NOT include SQLite databases.")
+        print("    Download the full dataset zip and unzip it:\n")
+        print("      1. https://yale-lily.github.io/spider  (official Spider Dataset link)")
+        print("      2. Unzip so you have:")
+        print(f"           {root}/train_spider.json")
+        print(f"           {root}/database/concert_singer/concert_singer.sqlite")
+        print("         Or set SPIDER_DATA to your extract path.\n")
+        print("      Alt (HF re-host with zip + DBs):")
+        print("        pip install huggingface_hub")
+        print("        huggingface-cli download HAL-9001/spider-databases spider_data.zip --local-dir /tmp/spider_hf")
+        print("        unzip /tmp/spider_hf/spider_data.zip -d /tmp/")
+        print("        SPIDER_DATA=/tmp/spider_data python fixtures/prepare_spider.py")
+
+    sys.exit(1)
+
+
+def main() -> None:
+    root = SPIDER_DATA
+    train_path = resolve_train_path(root)
+    db_base = resolve_db_base(root)
+
+    if not train_path or not db_base:
+        _die_missing_data(root)
+
+    available_dbs = list_available_dbs(db_base)
+    print(f"Using train data: {train_path}")
+    print(f"Using databases:  {db_base}")
     print(f"Found {len(available_dbs)} databases with SQLite files")
 
     with open(train_path) as f:
@@ -87,14 +160,27 @@ def main() -> None:
             "required_complexity": count_complexity(sql),
         })
 
+    if not classified:
+        print("No questions matched available databases — check SPIDER_DATA layout.")
+        sys.exit(1)
+
     easy_med = [q for q in classified if q["difficulty"] in ("easy", "medium")]
     hard_extra = [q for q in classified if q["difficulty"] in ("hard", "extra")]
     print(f"Classified: {len(easy_med)} easy/med, {len(hard_extra)} hard/extra")
+
+    if len(easy_med) < TARGET_EASY_MED or len(hard_extra) < TARGET_HARD_EXTRA:
+        print(
+            f"Warning: wanted {TARGET_EASY_MED}+{TARGET_HARD_EXTRA} questions, "
+            f"have {len(easy_med)}+{len(hard_extra)} — using all available."
+        )
 
     rng = random.Random(SEED)
     rng.shuffle(easy_med)
     rng.shuffle(hard_extra)
     selected = easy_med[:TARGET_EASY_MED] + hard_extra[:TARGET_HARD_EXTRA]
+    if not selected:
+        print("No questions selected — cannot build subset.")
+        sys.exit(1)
     for i, item in enumerate(selected):
         item["id"] = f"spider_{i + 1:03d}"
 

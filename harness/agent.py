@@ -24,11 +24,29 @@ _MINIMAX_BASE_URL = "https://api.minimax.io/v1"
 _client: OpenAI | None = None
 
 
+class MissingCredentialsError(RuntimeError):
+    """Raised when MINIMAX_API_KEY is not set — fail fast instead of emitting
+    error-SQL telemetry that silently pollutes the drift stream."""
+
+
+def require_api_key() -> None:
+    """Call at startup so a missing key stops the run loudly, before any
+    telemetry is written. Without this, every run becomes a fake '-- error'
+    record that the evaluator can score as valid/correct by accident."""
+    if not os.environ.get("MINIMAX_API_KEY"):
+        raise MissingCredentialsError(
+            "MINIMAX_API_KEY is not set. Export it in THIS shell before running:\n"
+            "    export MINIMAX_API_KEY=sk-...\n"
+            "then re-run. (A key set in another terminal does not carry over.)"
+        )
+
+
 def _get_client() -> OpenAI:
     global _client
     if _client is None:
+        require_api_key()
         _client = OpenAI(
-            api_key=os.environ.get("MINIMAX_API_KEY", ""),
+            api_key=os.environ["MINIMAX_API_KEY"],
             base_url=_MINIMAX_BASE_URL,
         )
     return _client
