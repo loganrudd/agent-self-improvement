@@ -62,7 +62,7 @@ _SYSTEM = (
 def _build_prompt(question: str, schema: str, examples: list[FewShotExample]) -> str:
     parts = [f"Schema:\n{schema}"]
     if examples:
-        shots = "\n\n".join(f"Q: {e.question}\nSQL: {e.correct_sql}" for e in examples[:8])
+        shots = "\n\n".join(f"Q: {e.question}\nSQL: {e.correct_sql}" for e in examples[:16])
         parts.append(f"Few-shot examples:\n{shots}")
     parts.append(f"Question: {question}\nSQL:")
     return "\n\n".join(parts)
