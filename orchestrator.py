@@ -39,24 +39,27 @@ def _correction_handle(event: DriftEvent, questions: list[dict]) -> CorrectionAc
         # build FailedRun objects from failing_run_ids in events.jsonl
         telem = {e.run_id: e for e in _re(only="telemetry")}
         hard = [q for q in questions if q["difficulty"] in ("hard", "extra")]
+        seen_dbs: set[str] = set()
         examples = []
-        for rid in event.failing_run_ids[:8]:
+        for rid in event.failing_run_ids[:16]:  # scan more to get diverse db_ids
             rec = telem.get(rid)
             if rec is None:
                 continue
-            # find gold SQL for this question
+            if rec.db_id in seen_dbs:
+                continue
             gold = next((q for q in hard if q["question"] == rec.question), None)
-            if gold:
+            if gold and len(examples) < 8:
                 examples.append(FewShotExample(
                     question=rec.question,
                     correct_sql=gold["expected_sql"],
                     db_id=rec.db_id,
                 ))
+                seen_dbs.add(rec.db_id)
         if examples:
             return CorrectionAction(
                 triggered_by=event.channel,
                 new_few_shot_examples=examples,
-                rationale=f"Mihir path: matched {len(examples)} failing runs to gold SQL.",
+                rationale=f"Mihir path: {len(examples)} failing runs matched to gold SQL, diverse db_ids.",
             )
     except Exception as exc:
         print(f"  [correction] Mihir stage unavailable ({exc}), using gold injection fallback")
@@ -98,7 +101,7 @@ def run(n_baseline: int, n_degraded: int, n_recovery: int) -> None:
     cfg = DetectorConfig(
         baseline_len=min(40, n_baseline),
         window=25,
-        drop_threshold=0.20,
+        drop_threshold=0.10,
         min_sustained=5,
     )
     det = Detector(cfg)
