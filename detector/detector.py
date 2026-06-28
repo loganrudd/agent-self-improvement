@@ -8,9 +8,13 @@ Phases:
 """
 from __future__ import annotations
 
+import json
+import sys
 import time
 from collections import Counter, deque
 from enum import Enum, auto
+from pathlib import Path
+from typing import Iterator
 
 from contracts.schemas import Difficulty, DriftEvent, FailureMode, TelemetryRecord
 
@@ -21,6 +25,59 @@ from detector.rolling import RollingStats
 # Soft coupling to the harness's API-error sentinel. Centralised here so there's
 # one place to update if the harness changes the prefix. (Open Q from Plan 002.)
 OUTAGE_SQL_PREFIX = "-- error:"
+
+
+# ---------------------------------------------------------------------------
+# Input loader (Step 1)
+# ---------------------------------------------------------------------------
+
+def _looks_enveloped(line: str) -> bool:
+    """True when the line is an eventlog typed envelope, not a raw TelemetryRecord."""
+    obj = json.loads(line)
+    return isinstance(obj, dict) and "type" in obj and "data" in obj
+
+
+def load_telemetry(
+    path: Path | str,
+    fmt: str = "auto",
+) -> Iterator[TelemetryRecord]:
+    """Yield TelemetryRecord from a JSONL file.
+
+    fmt: "raw" (bare TelemetryRecord lines), "events" (typed envelopes,
+    telemetry-only), or "auto" (sniff the first non-blank line to decide).
+    Malformed lines are skipped with a stderr warning; non-telemetry envelopes
+    are skipped silently.
+    """
+    p = Path(path)
+    lines = p.read_text().splitlines()
+    non_blank = [l for l in lines if l.strip()]
+
+    resolved = fmt
+    if fmt == "auto" and non_blank:
+        try:
+            resolved = "events" if _looks_enveloped(non_blank[0]) else "raw"
+        except (json.JSONDecodeError, KeyError):
+            resolved = "raw"
+
+    bad = 0
+    for lineno, raw in enumerate(lines, 1):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            if resolved == "events":
+                obj = json.loads(raw)
+                if obj.get("type") != "telemetry":
+                    continue
+                yield TelemetryRecord.model_validate(obj["data"])
+            else:
+                yield TelemetryRecord.model_validate_json(raw)
+        except Exception as exc:
+            bad += 1
+            print(f"[detector] warning: skipping line {lineno}: {exc}", file=sys.stderr)
+
+    if bad:
+        print(f"[detector] warning: skipped {bad} malformed line(s) in {p}", file=sys.stderr)
 
 
 class _State(Enum):
