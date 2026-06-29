@@ -6,7 +6,10 @@ A text-to-SQL agent runs in "production" against the [Spider](https://yale-lily.
 benchmark. When its accuracy **drifts** as queries get harder, the system detects the
 degradation, makes the agent **learn from its own failures** — a teacher model turns the
 agent's mistakes into few-shot examples — and the agent **recovers on questions it has never
-seen**. No human in the loop.
+seen**. No human in the loop. The detection-and-recovery pattern here — windowed drift detection 
+over a telemetry stream, severity scoring, automated response — is a general infrastructure spine: 
+the agent is just the system under observation, and the same shape applies to monitoring any drifting 
+stream, from API behavior to physical-system telemetry.
 
 > Built for **The Self-Improvement Stack** track at the AI Engineer World's Fair Hackathon.
 > **Every commit in this repository was written during the event (June 27, 2026).** No
@@ -31,6 +34,8 @@ model swap:
 The self-improved base agent **exceeded its own teacher** on the same questions — because
 5 of the 10 injected examples are execution-verified gold SQL that the teacher itself couldn't
 produce, scaffolding the weaker model beyond the stronger one's unaided performance.
+
+<img width="1045" height="678" alt="Self Improving Agent" src="https://github.com/user-attachments/assets/83d13a2b-cb72-49c9-a72e-bb87b0264062" />
 
 In one unattended run the detector fired automatically at the change-point
 (`severity=0.295`, windowed accuracy `0.48` vs `0.775` baseline), correction synthesized 10
@@ -225,8 +230,9 @@ offline without an API key.
 
 Python · Pydantic (typed contracts) · SQLite + Spider EX metric (execution-based eval) ·
 MiniMax (OpenAI-compatible API) for base + teacher models · FastAPI + Chart.js (viewer).
-Local-only by design; horizontal scaling (stateless, per-channel detectors, Ray fan-out) is
-an architecture property, not a build dependency.
+Local-only by design, but the architecture scales horizontally without redesign: stateless 
+stages behind frozen contracts, per-channel detectors, Ray fan-out for parallel training. 
+The same shape generalizes from one agent to hundreds of independent telemetry channels.
 
 ## Team
 
